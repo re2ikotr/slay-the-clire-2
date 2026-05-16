@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use rust_decimal::Decimal;
 
+use crate::content::cards::CardPlayCtx;
 use crate::core::command::CommandError;
 use crate::core::effect::{DamageOp, DamageResult, Effect};
 use crate::core::engine::{combat_result_for_state, StepResult};
@@ -13,6 +14,7 @@ use crate::core::log::{LogEntry, StateChange};
 use crate::core::query::{BlockCalc, DamageCalc, Decision, PreventReason, ResourceCostCalc};
 use crate::core::rules::RulePipeline;
 use crate::core::state::{CardCost, CombatPhase, GameState, ResourceKind, StateError};
+use crate::registry::StaticRegistry;
 
 #[derive(Default)]
 pub struct EffectResolver {
@@ -54,11 +56,11 @@ impl EffectResolver {
         std::mem::take(&mut self.log)
     }
 
-    pub fn drain(&mut self, state: &mut GameState) -> StepResult {
+    pub fn drain(&mut self, state: &mut GameState, registry: &StaticRegistry) -> StepResult {
         while let Some(effect) = self.queue.pop_front() {
             self.log.push(LogEntry::EffectStarted(effect.clone()));
 
-            match self.apply_effect(state, effect) {
+            match self.apply_effect(state, registry, effect) {
                 ApplyResult::Continue(more) => self.queue.extend(more),
                 ApplyResult::NeedChoice(choice) => {
                     self.pending_choice = Some(choice.clone());
@@ -82,22 +84,27 @@ impl EffectResolver {
         StepResult::Done(self.take_log())
     }
 
-    fn apply_effect(&mut self, state: &mut GameState, effect: Effect) -> ApplyResult {
+    fn apply_effect(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        effect: Effect,
+    ) -> ApplyResult {
         match effect {
             Effect::Trigger(event) => {
                 self.log.push(LogEntry::EventTriggered(event.clone()));
-                ApplyResult::Continue(RulePipeline::notify(state, &event))
+                ApplyResult::Continue(RulePipeline::notify(registry, state, &event))
             }
             Effect::ValidateCardPlay {
                 player,
                 card,
                 target,
             } => {
-                let decision = RulePipeline::should_play(state, card, target);
+                let decision = RulePipeline::should_play(registry, state, card, target);
                 self.log.push(LogEntry::DecisionMade(decision.clone()));
                 match decision {
                     Decision::Allow => {
-                        match self.resolve_card_payment(state, player, card, false) {
+                        match self.resolve_card_payment(state, registry, player, card, false) {
                             Ok(_) => ApplyResult::Continue(Vec::new()),
                             Err(error) => ApplyResult::Rejected(error),
                         }
@@ -165,13 +172,23 @@ impl EffectResolver {
                 }
             }
             Effect::PayCardCosts { player, card } => {
-                match self.resolve_card_payment(state, player, card, true) {
+                match self.resolve_card_payment(state, registry, player, card, true) {
                     Ok(payment) => self.spend_card_payment(state, player, payment),
                     Err(error) => ApplyResult::Rejected(error),
                 }
             }
-            Effect::ExecuteCardBody { .. } => ApplyResult::Continue(Vec::new()),
-            Effect::DealDamage(op) => self.apply_damage(state, op),
+            Effect::ExecuteCardBody { card, target, .. } => {
+                let effects = state
+                    .card(card)
+                    .and_then(|card_state| registry.cards.get(card_state.def))
+                    .map(|def| {
+                        let ctx = CardPlayCtx { state };
+                        (def.play)(&ctx, card, target)
+                    })
+                    .unwrap_or_default();
+                ApplyResult::Continue(effects)
+            }
+            Effect::DealDamage(op) => self.apply_damage(state, registry, op),
             Effect::GainBlock {
                 target,
                 amount,
@@ -183,7 +200,7 @@ impl EffectResolver {
                     base_amount: amount,
                     amount,
                 };
-                let (calc, modifiers) = RulePipeline::modify_block(state, calc);
+                let (calc, modifiers) = RulePipeline::modify_block(registry, state, calc);
                 self.log
                     .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
                 match state.gain_block(target, calc.amount) {
@@ -253,7 +270,7 @@ impl EffectResolver {
                 }
                 Err(error) => ApplyResult::StateError(error),
             },
-            Effect::CheckDeaths => self.check_deaths(state),
+            Effect::CheckDeaths => self.check_deaths(state, registry),
             Effect::CheckCombatEnd => combat_result_for_state(state)
                 .map(ApplyResult::CombatOver)
                 .unwrap_or_else(|| ApplyResult::Continue(Vec::new())),
@@ -288,7 +305,12 @@ impl EffectResolver {
         }
     }
 
-    fn apply_damage(&mut self, state: &mut GameState, op: DamageOp) -> ApplyResult {
+    fn apply_damage(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        op: DamageOp,
+    ) -> ApplyResult {
         let calc = DamageCalc {
             source: op.source,
             dealer: op.dealer,
@@ -297,7 +319,7 @@ impl EffectResolver {
             base_amount: op.base_amount,
             amount: op.base_amount,
         };
-        let (calc, modifiers) = RulePipeline::modify_damage(state, calc);
+        let (calc, modifiers) = RulePipeline::modify_damage(registry, state, calc);
         self.log
             .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
 
@@ -359,6 +381,7 @@ impl EffectResolver {
     fn resolve_card_payment(
         &mut self,
         state: &GameState,
+        registry: &StaticRegistry,
         player: crate::core::ids::PlayerId,
         card: crate::core::ids::CardInstanceId,
         log_modifiers: bool,
@@ -371,6 +394,7 @@ impl EffectResolver {
                 state,
                 player,
                 card,
+                registry,
                 ResourceKind::Energy,
                 costs.energy,
                 log_modifiers,
@@ -379,6 +403,7 @@ impl EffectResolver {
                 state,
                 player,
                 card,
+                registry,
                 ResourceKind::Stars,
                 costs.stars,
                 log_modifiers,
@@ -391,6 +416,7 @@ impl EffectResolver {
         state: &GameState,
         player: crate::core::ids::PlayerId,
         card: crate::core::ids::CardInstanceId,
+        registry: &StaticRegistry,
         resource: ResourceKind,
         cost: CardCost,
         log_modifiers: bool,
@@ -410,7 +436,7 @@ impl EffectResolver {
                 base_cost: amount,
                 cost: amount,
             };
-            let (calc, modifiers) = RulePipeline::modify_resource_cost(state, calc);
+            let (calc, modifiers) = RulePipeline::modify_resource_cost(registry, state, calc);
             if log_modifiers {
                 self.log
                     .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
@@ -466,10 +492,10 @@ impl EffectResolver {
         ApplyResult::Continue(effects)
     }
 
-    fn check_deaths(&mut self, state: &mut GameState) -> ApplyResult {
+    fn check_deaths(&mut self, state: &mut GameState, registry: &StaticRegistry) -> ApplyResult {
         let mut effects = Vec::new();
         for creature in state.death_candidates() {
-            let decision = RulePipeline::should_die(state, creature);
+            let decision = RulePipeline::should_die(registry, state, creature);
             self.log.push(LogEntry::DecisionMade(decision.clone()));
             match decision {
                 Decision::Allow => match state.mark_dead(creature) {
@@ -521,12 +547,120 @@ enum ApplyResult {
 mod tests {
     use rust_decimal::Decimal;
 
-    use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect};
+    use crate::content::cards::{
+        CardDef, CardPlayCtx, CardRarity, CardRules, CardType, TargetType,
+    };
+    use crate::content::powers::{PowerDef, PowerRules};
+    use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
     use crate::core::engine::{CombatOutcome, Engine, StepResult};
-    use crate::core::state::{CardCost, GameState};
+    use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey, PowerId, PowerInstanceId};
+    use crate::core::query::{
+        DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
+    };
+    use crate::core::rules::{prevent_by_current_listener, RuleCtx};
+    use crate::core::state::{CardCost, CardCosts, GameState};
     use crate::core::Command;
+    use crate::registry::StaticRegistry;
 
     use super::EffectResolver;
+
+    const STARTER_STRIKE: CardId = CardId::new("starter_strike");
+    const TEST_STRENGTH: PowerId = PowerId::new("test_strength");
+    const TEST_CANNOT_DIE: PowerId = PowerId::new("test_cannot_die");
+
+    fn test_strike_body(
+        ctx: &CardPlayCtx<'_>,
+        card: CardInstanceId,
+        target: Option<CreatureId>,
+    ) -> Vec<Effect> {
+        let Some(target) = target else {
+            return Vec::new();
+        };
+
+        vec![Effect::DealDamage(DamageOp {
+            source: Some(Source::Card(card)),
+            dealer: ctx.state.player_creature_id(),
+            target,
+            base_amount: Decimal::from(6),
+            kind: DamageKind::Attack,
+            flags: DamageFlags {
+                ignores_block: false,
+                is_attack: true,
+            },
+        })]
+    }
+
+    fn test_strike_def() -> CardDef {
+        CardDef {
+            id: STARTER_STRIKE,
+            loc_key: LocKey::new("card.starter_strike"),
+            card_type: CardType::Attack,
+            rarity: CardRarity::Basic,
+            target: TargetType::Enemy,
+            base_costs: CardCosts::energy(1),
+            play: test_strike_body,
+            rules: CardRules::default(),
+        }
+    }
+
+    fn strength_additive(
+        ctx: &RuleCtx<'_>,
+        power: PowerInstanceId,
+        mut calc: DamageCalc,
+    ) -> DamageCalc {
+        let amount = ctx
+            .state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+            .map(|instance| instance.amount)
+            .unwrap_or_default();
+        calc.amount += amount;
+        calc
+    }
+
+    fn strength_def() -> PowerDef {
+        PowerDef {
+            id: TEST_STRENGTH,
+            loc_key: LocKey::new("power.test_strength"),
+            rules: PowerRules {
+                modify_damage_additive: Some(strength_additive),
+                ..PowerRules::default()
+            },
+        }
+    }
+
+    fn prevent_owner_death(
+        ctx: &RuleCtx<'_>,
+        power: PowerInstanceId,
+        query: &DecisionQuery,
+    ) -> Decision {
+        let DecisionQueryKind::ShouldDie { creature } = query.kind else {
+            return Decision::Allow;
+        };
+        let owns_power = ctx
+            .state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+            .map(|instance| instance.owner == creature)
+            .unwrap_or(false);
+
+        if owns_power {
+            prevent_by_current_listener(ctx, PreventReason::CannotDie)
+        } else {
+            Decision::Allow
+        }
+    }
+
+    fn cannot_die_def() -> PowerDef {
+        PowerDef {
+            id: TEST_CANNOT_DIE,
+            loc_key: LocKey::new("power.test_cannot_die"),
+            rules: PowerRules {
+                decide: Some(prevent_owner_death),
+                ..PowerRules::default()
+            },
+        }
+    }
 
     #[test]
     fn damage_effect_can_end_combat() {
@@ -547,7 +681,8 @@ mod tests {
         }));
         resolver.enqueue(Effect::CheckCombatEnd);
 
-        match resolver.drain(&mut state) {
+        let registry = StaticRegistry::default();
+        match resolver.drain(&mut state, &registry) {
             StepResult::CombatOver(result, _) => {
                 assert_eq!(result.outcome, CombatOutcome::Victory);
             }
@@ -598,5 +733,91 @@ mod tests {
         assert_eq!(combat.player.energy, 3);
         assert_eq!(combat.player.stars, 0);
         assert!(combat.player.piles.hand.contains(&card));
+    }
+
+    #[test]
+    fn card_body_is_resolved_through_registry() {
+        let mut registry = StaticRegistry::default();
+        registry.cards.register(test_strike_def());
+
+        let mut engine = Engine::with_registry(GameState::demo_combat(13), registry);
+        let player = engine.state.player_id().unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        let target = engine.state.combat().unwrap().monster_ids()[0];
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: Some(target),
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        let enemy = engine.state.creature(target).unwrap();
+        assert_eq!(enemy.hp, Decimal::from(24));
+    }
+
+    #[test]
+    fn power_rule_can_modify_damage() {
+        let mut registry = StaticRegistry::default();
+        registry.cards.register(test_strike_def());
+        registry.powers.register(strength_def());
+
+        let mut engine = Engine::with_registry(GameState::demo_combat(14), registry);
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        engine
+            .state
+            .apply_power(player_creature, TEST_STRENGTH, Decimal::from(2))
+            .unwrap();
+
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        let target = engine.state.combat().unwrap().monster_ids()[0];
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: Some(target),
+        });
+
+        let StepResult::Done(log) = result else {
+            panic!("expected card play to finish");
+        };
+        assert!(log
+            .iter()
+            .any(|entry| matches!(entry, crate::core::log::LogEntry::ModifierApplied(_))));
+        let enemy = engine.state.creature(target).unwrap();
+        assert_eq!(enemy.hp, Decimal::from(22));
+    }
+
+    #[test]
+    fn decision_rule_can_prevent_death() {
+        let mut registry = StaticRegistry::default();
+        registry.powers.register(cannot_die_def());
+
+        let mut state = GameState::demo_combat(15);
+        let target = state.combat().unwrap().monster_ids()[0];
+        state
+            .apply_power(target, TEST_CANNOT_DIE, Decimal::from(1))
+            .unwrap();
+
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::DealDamage(DamageOp {
+            source: None,
+            dealer: state.player_creature_id(),
+            target,
+            base_amount: Decimal::from(99),
+            kind: DamageKind::Attack,
+            flags: DamageFlags {
+                ignores_block: false,
+                is_attack: true,
+            },
+        }));
+
+        let result = resolver.drain(&mut state, &registry);
+
+        assert!(matches!(result, StepResult::Done(_)));
+        let creature = state.creature(target).unwrap();
+        assert!(creature.alive);
+        assert!(creature.hp <= Decimal::from(0));
     }
 }

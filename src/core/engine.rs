@@ -4,16 +4,23 @@ use crate::core::event::{CardPlayStarted, CardPlayed, Event};
 use crate::core::log::LogEntry;
 use crate::core::resolver::EffectResolver;
 use crate::core::state::{CombatPhase, GameState, PileId, PileKind, Side};
+use crate::registry::StaticRegistry;
 
 pub struct Engine {
     pub state: GameState,
+    pub registry: StaticRegistry,
     resolver: EffectResolver,
 }
 
 impl Engine {
     pub fn new(state: GameState) -> Self {
+        Self::with_registry(state, StaticRegistry::default())
+    }
+
+    pub fn with_registry(state: GameState, registry: StaticRegistry) -> Self {
         Self {
             state,
+            registry,
             resolver: EffectResolver::default(),
         }
     }
@@ -22,7 +29,7 @@ impl Engine {
         if self.resolver.has_pending_choice() {
             return match command {
                 Command::Choose { choice } => match self.resolver.submit_choice(choice) {
-                    Ok(()) => self.resolver.drain(&mut self.state),
+                    Ok(()) => self.resolver.drain(&mut self.state, &self.registry),
                     Err(error) => StepResult::Rejected(error, self.resolver.take_log()),
                 },
                 _ => StepResult::Rejected(CommandError::ChoiceRequired, self.resolver.take_log()),
@@ -36,7 +43,7 @@ impl Engine {
         match command_to_effects(&self.state, command) {
             Ok(effects) => {
                 self.resolver.enqueue_all(effects);
-                self.resolver.drain(&mut self.state)
+                self.resolver.drain(&mut self.state, &self.registry)
             }
             Err(error) => StepResult::Rejected(error, self.resolver.take_log()),
         }

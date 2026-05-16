@@ -8,6 +8,7 @@ pub mod log;
 pub mod query;
 pub mod resolver;
 pub mod rng;
+pub mod rule_point;
 pub mod rules;
 pub mod state;
 

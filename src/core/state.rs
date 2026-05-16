@@ -4,12 +4,12 @@ use std::fmt;
 use rust_decimal::Decimal;
 
 use crate::core::ids::{
-    CardId, CardInstanceId, CombatId, CreatureId, ModifierInstanceId, PlayerId, PotionId,
-    PotionInstanceId, PowerId, PowerInstanceId, RelicId, RelicInstanceId,
+    CardId, CardInstanceId, CombatId, CreatureId, ModifierInstanceId, MonsterId, PlayerId,
+    PotionId, PotionInstanceId, PowerId, PowerInstanceId, RelicId, RelicInstanceId,
 };
 use crate::core::rng::RngSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Side {
     Player,
     Monsters,
@@ -158,6 +158,7 @@ pub struct PotionInstance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Creature {
     pub id: CreatureId,
+    pub model: Option<MonsterId>,
     pub side: Side,
     pub hp: Decimal,
     pub max_hp: Decimal,
@@ -170,6 +171,7 @@ impl Creature {
     pub fn new(id: CreatureId, side: Side, max_hp: Decimal) -> Self {
         Self {
             id,
+            model: None,
             side,
             hp: max_hp,
             max_hp,
@@ -177,6 +179,11 @@ impl Creature {
             powers: Vec::new(),
             alive: true,
         }
+    }
+
+    pub fn with_model(mut self, model: MonsterId) -> Self {
+        self.model = Some(model);
+        self
     }
 }
 

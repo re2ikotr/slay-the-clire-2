@@ -3,13 +3,18 @@ use rust_decimal::Decimal;
 use crate::core::effect::{DamageKind, Source};
 use crate::core::ids::{CardInstanceId, CreatureId, PlayerId};
 use crate::core::listener::ListenerRef;
-use crate::core::state::ResourceKind;
+use crate::core::state::{PileId, ResourceKind, Side};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Query {
     ModifyDamage(DamageCalc),
     ModifyBlock(BlockCalc),
     ModifyResourceCost(ResourceCostCalc),
+    ModifyCardPlayCount(CardPlayCountCalc),
+    ModifyCardPlayResultPile(CardPlayResultPileCalc),
+    ModifyHandDraw(HandDrawCalc),
+    ModifyHpLoss(HpLossCalc),
+    ModifyUnblockedDamageTarget(UnblockedDamageTargetCalc),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +42,99 @@ pub struct ResourceCostCalc {
     pub resource: ResourceKind,
     pub base_cost: i32,
     pub cost: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardPlayCountCalc {
+    pub card: CardInstanceId,
+    pub target: Option<CreatureId>,
+    pub base_count: i32,
+    pub count: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardPlayResultPileCalc {
+    pub card: CardInstanceId,
+    pub base_pile: PileId,
+    pub pile: PileId,
+    pub position: PilePosition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PilePosition {
+    Top,
+    Bottom,
+    Random,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandDrawCalc {
+    pub player: PlayerId,
+    pub base_count: Decimal,
+    pub count: Decimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HpLossCalc {
+    pub source: Option<Source>,
+    pub dealer: Option<CreatureId>,
+    pub target: CreatureId,
+    pub kind: DamageKind,
+    pub base_amount: Decimal,
+    pub amount: Decimal,
+    pub phase: HpLossPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HpLossPhase {
+    BeforeRedirect,
+    AfterRedirect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnblockedDamageTargetCalc {
+    pub source: Option<Source>,
+    pub dealer: Option<CreatureId>,
+    pub original_target: CreatureId,
+    pub target: CreatureId,
+    pub amount: Decimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecisionQuery {
+    pub kind: DecisionQueryKind,
+    pub source: Option<Source>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DecisionQueryKind {
+    ShouldPlay {
+        card: CardInstanceId,
+        target: Option<CreatureId>,
+    },
+    ShouldDraw {
+        player: PlayerId,
+        from_hand_draw: bool,
+    },
+    ShouldDie {
+        creature: CreatureId,
+    },
+    ShouldClearBlock {
+        creature: CreatureId,
+    },
+    ShouldFlush {
+        player: PlayerId,
+    },
+    ShouldPayExcessEnergyCostWithStars {
+        player: PlayerId,
+    },
+    ShouldStopCombatFromEnding,
+    ShouldTakeExtraTurn {
+        player: PlayerId,
+    },
+    ShouldStartTurn {
+        side: Side,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +170,7 @@ pub struct ModifierLog {
     pub after: Decimal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ModifierPhase {
     Additive,
     Multiplicative,

@@ -21,6 +21,7 @@ id_type!(CardInstanceId);
 id_type!(PowerInstanceId);
 id_type!(RelicInstanceId);
 id_type!(PotionInstanceId);
+id_type!(OrbInstanceId);
 id_type!(ModifierInstanceId);
 id_type!(ChoiceId);
 id_type!(CombatId);
