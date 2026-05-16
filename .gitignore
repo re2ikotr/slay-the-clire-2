@@ -1,0 +1,31 @@
+# Agent / Codex local files
+AGENTS.md
+AGENTS.override.md
+.codex/
+.agents/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+tokens/
+
+# Rust
+/target/
+
+# Logs
+*.log
+logs/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
