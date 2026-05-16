@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    slay_the_clire_2::adapters::cli::run();
 }

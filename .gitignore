@@ -3,6 +3,7 @@ AGENTS.md
 AGENTS.override.md
 .codex/
 .agents/
+agent_docs/
 
 # Secrets
 .env
@@ -18,7 +19,7 @@ credentials/
 tokens/
 
 # Rust
-/target/
+target/
 
 # Logs
 *.log
