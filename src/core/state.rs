@@ -458,6 +458,94 @@ impl GameState {
         Self::with_combat(seed, combat)
     }
 
+    pub fn full_nibbit_combat(seed: u64) -> Self {
+        let player_id = PlayerId::new(1);
+        let player_creature = CreatureId::new(1);
+        let enemy = CreatureId::new(2);
+        let draw = PileId::player(player_id, PileKind::Draw);
+        let hand = PileId::player(player_id, PileKind::Hand);
+
+        let mut cards = BTreeMap::new();
+        let mut draw_cards = Vec::new();
+        let starter_defs = [
+            STRIKE_IRONCLAD,
+            STRIKE_IRONCLAD,
+            STRIKE_IRONCLAD,
+            STRIKE_IRONCLAD,
+            STRIKE_IRONCLAD,
+            DEFEND_IRONCLAD,
+            DEFEND_IRONCLAD,
+            DEFEND_IRONCLAD,
+            DEFEND_IRONCLAD,
+        ];
+
+        for (index, def) in starter_defs.into_iter().enumerate() {
+            let id = CardInstanceId::new((index + 1) as u32);
+            cards.insert(
+                id,
+                CardInstance {
+                    id,
+                    def,
+                    owner: player_id,
+                    upgraded: false,
+                    costs: CardCosts::energy(1),
+                    temp_costs: TemporaryCardCosts::default(),
+                    pile: draw,
+                    flags: CardFlags::default(),
+                },
+            );
+            draw_cards.push(id);
+        }
+
+        let mut rng = RngSet::seeded(seed);
+        rng.shuffle.shuffle(&mut draw_cards);
+
+        let mut hand_cards = Vec::new();
+        for _ in 0..2 {
+            if let Some(card) = draw_cards.pop() {
+                if let Some(card_state) = cards.get_mut(&card) {
+                    card_state.pile = hand;
+                }
+                hand_cards.push(card);
+            }
+        }
+
+        let mut piles = CardPiles::default();
+        piles.draw = draw_cards;
+        piles.hand = hand_cards;
+
+        let combat = CombatState {
+            id: CombatId::new(1),
+            phase: CombatPhase::PlayerAction,
+            player: PlayerState {
+                id: player_id,
+                creature: player_creature,
+                energy: 3,
+                max_energy: 3,
+                stars: 0,
+                relics: Vec::new(),
+                potions: Vec::new(),
+                piles,
+            },
+            creatures: vec![
+                Creature::new(player_creature, Side::Player, 50),
+                Creature::new(enemy, Side::Monsters, 42).with_model(NIBBIT),
+            ],
+            cards,
+            powers: BTreeMap::new(),
+            relics: BTreeMap::new(),
+            potions: BTreeMap::new(),
+            modifiers: Vec::new(),
+            next_power_instance: 1,
+        };
+
+        Self {
+            run: RunState { seed },
+            combat: Some(combat),
+            rng,
+        }
+    }
+
     pub fn combat(&self) -> Option<&CombatState> {
         self.combat.as_ref()
     }
@@ -603,37 +691,61 @@ impl GameState {
         Ok(from)
     }
 
-    pub fn draw_cards(
+    pub fn shuffle_discard_into_draw_if_needed(
         &mut self,
         player: PlayerId,
-        count: u8,
-    ) -> Result<Vec<CardInstanceId>, StateError> {
+    ) -> Result<Option<Vec<CardInstanceId>>, StateError> {
         let rng = &mut self.rng.shuffle;
         let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
         if combat.player.id != player {
             return Err(StateError::UnknownPlayer(player));
         }
 
+        if !combat.player.piles.draw.is_empty() || combat.player.piles.discard.is_empty() {
+            return Ok(None);
+        }
+
+        let mut cards = std::mem::take(&mut combat.player.piles.discard);
+        rng.shuffle(&mut cards);
+        for card in &cards {
+            if let Some(card_state) = combat.cards.get_mut(card) {
+                card_state.pile = PileId::player(player, PileKind::Draw);
+            }
+        }
+        combat.player.piles.draw = cards.clone();
+        Ok(Some(cards))
+    }
+
+    pub fn draw_one_card(
+        &mut self,
+        player: PlayerId,
+    ) -> Result<Option<CardInstanceId>, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+
+        let Some(card) = combat.player.piles.draw.pop() else {
+            return Ok(None);
+        };
+        combat.player.piles.hand.push(card);
+        if let Some(card_state) = combat.cards.get_mut(&card) {
+            card_state.pile = PileId::player(player, PileKind::Hand);
+        }
+        Ok(Some(card))
+    }
+
+    pub fn draw_cards(
+        &mut self,
+        player: PlayerId,
+        count: u8,
+    ) -> Result<Vec<CardInstanceId>, StateError> {
         let mut drawn = Vec::new();
         for _ in 0..count {
-            if combat.player.piles.draw.is_empty() && !combat.player.piles.discard.is_empty() {
-                let mut cards = std::mem::take(&mut combat.player.piles.discard);
-                rng.shuffle(&mut cards);
-                for card in &cards {
-                    if let Some(card_state) = combat.cards.get_mut(card) {
-                        card_state.pile = PileId::player(player, PileKind::Draw);
-                    }
-                }
-                combat.player.piles.draw = cards;
-            }
-
-            let Some(card) = combat.player.piles.draw.pop() else {
+            self.shuffle_discard_into_draw_if_needed(player)?;
+            let Some(card) = self.draw_one_card(player)? else {
                 break;
             };
-            combat.player.piles.hand.push(card);
-            if let Some(card_state) = combat.cards.get_mut(&card) {
-                card_state.pile = PileId::player(player, PileKind::Hand);
-            }
             drawn.push(card);
         }
         Ok(drawn)

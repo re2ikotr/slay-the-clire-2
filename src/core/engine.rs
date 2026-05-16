@@ -154,6 +154,10 @@ pub(crate) fn combat_result_for_state(state: &GameState) -> Option<CombatResult>
 #[cfg(test)]
 mod tests {
     use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
+    use crate::core::event::Event;
+    use crate::core::ids::{CardInstanceId, CreatureId};
+    use crate::core::log::{LogEntry, StateChange};
+    use crate::core::state::ResourceKind;
 
     use super::*;
 
@@ -215,5 +219,113 @@ mod tests {
         assert_eq!(player_creature.hp, 43);
         assert_eq!(player_creature.block, 0);
         assert_eq!(engine.state.creature(enemy).unwrap().turns_taken, 1);
+    }
+
+    #[test]
+    fn full_nibbit_combat_runs_to_victory_after_shuffle() {
+        let mut engine = Engine::new(GameState::full_nibbit_combat(4));
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.player.piles.hand.len(), 2);
+        assert_eq!(combat.player.piles.draw.len(), 7);
+
+        let enemy = combat.monster_ids()[0];
+        let player_creature = combat.player.creature;
+        let (outcome, log) = run_auto_nibbit_combat(&mut engine);
+
+        assert_eq!(outcome, CombatOutcome::Victory);
+        assert!(!engine.state.creature(enemy).unwrap().alive);
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::StateChanged(StateChange::CardsShuffled { .. })
+        )));
+        assert!(log
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::EventTriggered(Event::CardsShuffled(_)))));
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::StateChanged(StateChange::ResourceGained {
+                resource: ResourceKind::Energy,
+                ..
+            })
+        )));
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::StateChanged(StateChange::DamageApplied(result))
+                if result.dealer == Some(enemy) && result.target == player_creature
+        )));
+    }
+
+    fn run_auto_nibbit_combat(engine: &mut Engine) -> (CombatOutcome, Vec<LogEntry>) {
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.combat().unwrap().monster_ids()[0];
+        let mut all_logs = Vec::new();
+
+        for _ in 0..20 {
+            while let Some((card, target)) = next_auto_card(engine, enemy) {
+                match engine.step(Command::PlayCard {
+                    player,
+                    card,
+                    target,
+                }) {
+                    StepResult::Done(log) => all_logs.extend(log),
+                    StepResult::CombatOver(result, log) => {
+                        all_logs.extend(log);
+                        return (result.outcome, all_logs);
+                    }
+                    other => panic!("unexpected play-card result: {other:?}"),
+                }
+            }
+
+            match engine.step(Command::EndTurn { side: Side::Player }) {
+                StepResult::Done(log) => all_logs.extend(log),
+                StepResult::CombatOver(result, log) => {
+                    all_logs.extend(log);
+                    return (result.outcome, all_logs);
+                }
+                other => panic!("unexpected end-turn result: {other:?}"),
+            }
+        }
+
+        panic!("combat did not finish within the smoke-test turn limit");
+    }
+
+    fn next_auto_card(
+        engine: &Engine,
+        enemy: CreatureId,
+    ) -> Option<(CardInstanceId, Option<CreatureId>)> {
+        let combat = engine.state.combat()?;
+        if combat.phase != CombatPhase::PlayerAction || combat.player.energy <= 0 {
+            return None;
+        }
+
+        let enemy_alive = engine
+            .state
+            .creature(enemy)
+            .map(|creature| creature.alive)
+            .unwrap_or(false);
+
+        let mut fallback = None;
+        for card in &combat.player.piles.hand {
+            let card_state = combat.cards.get(card)?;
+            let costs = card_state.effective_costs();
+            let Some(energy) = costs.energy.amount_to_pay(combat.player.energy) else {
+                continue;
+            };
+            let Some(stars) = costs.stars.amount_to_pay(combat.player.stars) else {
+                continue;
+            };
+            if energy > combat.player.energy || stars > combat.player.stars {
+                continue;
+            }
+
+            if card_state.def == STRIKE_IRONCLAD && enemy_alive {
+                return Some((*card, Some(enemy)));
+            }
+            if card_state.def == DEFEND_IRONCLAD {
+                fallback.get_or_insert((*card, None));
+            }
+        }
+
+        fallback
     }
 }

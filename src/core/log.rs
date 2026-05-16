@@ -42,6 +42,10 @@ pub enum StateChange {
         target: CreatureId,
         power: PowerInstanceId,
     },
+    CardsShuffled {
+        player: PlayerId,
+        cards: Vec<CardInstanceId>,
+    },
     CardMoved {
         card: CardInstanceId,
         from: Option<PileId>,

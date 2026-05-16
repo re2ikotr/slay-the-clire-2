@@ -7,6 +7,7 @@ pub enum Event {
     CombatStarted,
     TurnStarted { side: Side },
     TurnEnded { side: Side },
+    CardsShuffled(CardsShuffled),
     CardDrawn(CardDrawn),
     CardPlayStarted(CardPlayStarted),
     CardPlayed(CardPlayed),
@@ -18,6 +19,12 @@ pub enum Event {
     CreatureHpChanged(CreatureHpChanged),
     DeathPrevented { creature: CreatureId },
     CreatureDied { creature: CreatureId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardsShuffled {
+    pub player: PlayerId,
+    pub cards: Vec<CardInstanceId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

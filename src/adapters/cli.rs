@@ -2,70 +2,106 @@ use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
 use crate::content::monsters::MonsterIntent;
 use crate::core::ids::{CardInstanceId, CreatureId};
 use crate::core::rules::RuleCtx;
-use crate::core::{Command, Engine, GameState, Side, StepResult};
+use crate::core::{CombatPhase, Command, Engine, GameState, Side, StepResult};
 
 pub fn run() {
-    let mut engine = Engine::new(GameState::basic_nibbit_combat(0));
+    let mut engine = Engine::new(GameState::full_nibbit_combat(0));
     let player = engine.state.player_id().expect("demo combat has a player");
     let enemy = engine
         .state
         .combat()
         .and_then(|combat| combat.monster_ids().first().copied())
         .expect("demo combat has a monster");
-    let (strike, defend) = starter_cards(&engine);
 
-    println!("slay-the-clire-2 basic combat smoke");
+    println!("slay-the-clire-2 full combat smoke");
     print_state("start", &engine, enemy);
-    print_result(
-        "play Defend",
-        engine.step(Command::PlayCard {
-            player,
-            card: defend,
-            target: None,
-        }),
-    );
-    print_state("after Defend", &engine, enemy);
-    print_result(
-        "play Strike",
-        engine.step(Command::PlayCard {
-            player,
-            card: strike,
-            target: Some(enemy),
-        }),
-    );
-    print_state("after Strike", &engine, enemy);
-    print_result(
-        "end turn",
-        engine.step(Command::EndTurn { side: Side::Player }),
-    );
-    print_state("next player turn", &engine, enemy);
-}
 
-fn starter_cards(engine: &Engine) -> (CardInstanceId, CardInstanceId) {
-    let combat = engine.state.combat().expect("demo combat is active");
-    let mut strike = None;
-    let mut defend = None;
-    for card in &combat.player.piles.hand {
-        let card_state = combat.cards.get(card).expect("hand card exists");
-        if card_state.def == STRIKE_IRONCLAD {
-            strike = Some(*card);
-        } else if card_state.def == DEFEND_IRONCLAD {
-            defend = Some(*card);
+    for turn in 1..=20 {
+        if engine
+            .state
+            .combat()
+            .map(|combat| combat.phase != CombatPhase::PlayerAction)
+            .unwrap_or(true)
+        {
+            break;
+        }
+
+        println!("turn {turn}");
+        while let Some((card, target, label)) = next_card_to_play(&engine, enemy) {
+            let finished = print_result(
+                &format!("play {label} {:?}", card),
+                engine.step(Command::PlayCard {
+                    player,
+                    card,
+                    target,
+                }),
+            );
+            print_state("after play", &engine, enemy);
+            if finished {
+                return;
+            }
+        }
+
+        let finished = print_result(
+            "end turn",
+            engine.step(Command::EndTurn { side: Side::Player }),
+        );
+        print_state("after turn cycle", &engine, enemy);
+        if finished {
+            return;
         }
     }
-    (
-        strike.expect("demo hand has Strike"),
-        defend.expect("demo hand has Defend"),
-    )
 }
 
-fn print_result(label: &str, result: StepResult) {
+fn next_card_to_play(
+    engine: &Engine,
+    enemy: CreatureId,
+) -> Option<(CardInstanceId, Option<CreatureId>, &'static str)> {
+    let combat = engine.state.combat()?;
+    if combat.player.energy <= 0 {
+        return None;
+    }
+
+    let enemy_alive = engine
+        .state
+        .creature(enemy)
+        .map(|creature| creature.alive)
+        .unwrap_or(false);
+
+    let mut fallback = None;
+    for card in &combat.player.piles.hand {
+        let card_state = combat.cards.get(card)?;
+        let costs = card_state.effective_costs();
+        let Some(energy) = costs.energy.amount_to_pay(combat.player.energy) else {
+            continue;
+        };
+        let Some(stars) = costs.stars.amount_to_pay(combat.player.stars) else {
+            continue;
+        };
+        if energy > combat.player.energy || stars > combat.player.stars {
+            continue;
+        }
+
+        if card_state.def == STRIKE_IRONCLAD && enemy_alive {
+            return Some((*card, Some(enemy), "Strike"));
+        }
+        if card_state.def == DEFEND_IRONCLAD {
+            fallback.get_or_insert((*card, None, "Defend"));
+        }
+    }
+
+    fallback
+}
+
+fn print_result(label: &str, result: StepResult) -> bool {
     match result {
         StepResult::Done(log) => {
             println!("{label}: done ({} log entries)", log.len());
+            false
         }
         StepResult::NeedChoice(_, log) => {
             println!("{label}: choice requested after {} log entries", log.len());
+            false
         }
         StepResult::CombatOver(result, log) => {
             println!(
@@ -73,12 +109,15 @@ fn print_result(label: &str, result: StepResult) {
                 result.outcome,
                 log.len()
             );
+            true
         }
         StepResult::Rejected(error, log) => {
             println!("{label}: rejected after {} log entries: {error}", log.len());
+            false
         }
         StepResult::Failed(error, log) => {
             println!("{label}: failed after {} log entries: {error}", log.len());
+            false
         }
     }
 }
@@ -93,11 +132,13 @@ fn print_state(label: &str, engine: &Engine, enemy: CreatureId) {
     let intent = monster_intent(engine, enemy);
 
     println!(
-        "{label}: player hp={} block={} energy={} hand={} | nibbit hp={} block={} intent={intent:?}",
+        "{label}: player hp={} block={} energy={} hand={} draw={} discard={} | nibbit hp={} block={} intent={intent:?}",
         player.hp,
         player.block,
         combat.player.energy,
         combat.player.piles.hand.len(),
+        combat.player.piles.draw.len(),
+        combat.player.piles.discard.len(),
         monster.hp,
         monster.block
     );

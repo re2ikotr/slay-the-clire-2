@@ -524,6 +524,7 @@ fn card_def<'a>(
 
 fn event_scope(event: &Event) -> ListenerScope {
     match event {
+        Event::CardsShuffled(_) => ListenerScope::Combat,
         Event::CardDrawn(event) => ListenerScope::Source(Source::Card(event.card)),
         Event::CardPlayStarted(event) => ListenerScope::Source(Source::Card(event.card)),
         Event::CardPlayed(event) => ListenerScope::Source(Source::Card(event.card)),

@@ -7,7 +7,7 @@ use crate::core::command::CommandError;
 use crate::core::effect::{DamageOp, DamageResult, Effect};
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
-    BlockGained, CardDrawn, CreatureHpChanged, Event, PowerApplied, ResourceChanged,
+    BlockGained, CardDrawn, CardsShuffled, CreatureHpChanged, Event, PowerApplied, ResourceChanged,
 };
 use crate::core::ids::{ChoiceId, CreatureId};
 use crate::core::listener::ListenerRef;
@@ -256,35 +256,9 @@ impl EffectResolver {
                 }
                 Err(error) => ApplyResult::StateError(error),
             },
-            Effect::DrawCards { player, count } => match state.draw_cards(player, count) {
-                Ok(cards) => {
-                    for card in &cards {
-                        self.log
-                            .push(LogEntry::StateChanged(StateChange::CardMoved {
-                                card: *card,
-                                from: Some(crate::core::state::PileId {
-                                    owner: player,
-                                    kind: PileKind::Draw,
-                                }),
-                                to: crate::core::state::PileId {
-                                    owner: player,
-                                    kind: PileKind::Hand,
-                                },
-                                reason: crate::core::effect::MoveReason::Draw,
-                            }));
-                    }
-
-                    ApplyResult::Continue(
-                        cards
-                            .into_iter()
-                            .map(|card| {
-                                Effect::Trigger(Event::CardDrawn(CardDrawn { player, card }))
-                            })
-                            .collect(),
-                    )
-                }
-                Err(error) => ApplyResult::StateError(error),
-            },
+            Effect::DrawCards { player, count } => {
+                self.apply_draw_cards(state, registry, player, count)
+            }
             Effect::DiscardHand { player } => match state.discard_hand(player) {
                 Ok(cards) => {
                     for card in cards {
@@ -478,6 +452,80 @@ impl EffectResolver {
         }
 
         ApplyResult::Continue(vec![Effect::EndTurn(Side::Monsters)])
+    }
+
+    fn apply_draw_cards(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: crate::core::ids::PlayerId,
+        count: u8,
+    ) -> ApplyResult {
+        if count == 0 {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let decision = RulePipeline::should_draw(registry, state, player, false);
+        self.log.push(LogEntry::DecisionMade(decision.clone()));
+        if !decision.is_allowed() {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        for _ in 0..count {
+            match state.shuffle_discard_into_draw_if_needed(player) {
+                Ok(Some(cards)) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::CardsShuffled {
+                            player,
+                            cards: cards.clone(),
+                        }));
+                    let event = Event::CardsShuffled(CardsShuffled { player, cards });
+                    match self.apply_immediate_effects(
+                        state,
+                        registry,
+                        vec![Effect::Trigger(event)],
+                    ) {
+                        ApplyResult::Continue(_) => {}
+                        other => return other,
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => return ApplyResult::StateError(error),
+            }
+
+            let card = match state.draw_one_card(player) {
+                Ok(Some(card)) => card,
+                Ok(None) => break,
+                Err(error) => return ApplyResult::StateError(error),
+            };
+
+            self.log
+                .push(LogEntry::StateChanged(StateChange::CardMoved {
+                    card,
+                    from: Some(crate::core::state::PileId {
+                        owner: player,
+                        kind: PileKind::Draw,
+                    }),
+                    to: crate::core::state::PileId {
+                        owner: player,
+                        kind: PileKind::Hand,
+                    },
+                    reason: crate::core::effect::MoveReason::Draw,
+                }));
+            match self.apply_immediate_effects(
+                state,
+                registry,
+                vec![Effect::Trigger(Event::CardDrawn(CardDrawn {
+                    player,
+                    card,
+                }))],
+            ) {
+                ApplyResult::Continue(_) => {}
+                other => return other,
+            }
+        }
+
+        ApplyResult::Continue(Vec::new())
     }
 
     fn apply_immediate_effects(
@@ -928,6 +976,35 @@ mod tests {
         match resolver.drain(&mut state, &registry) {
             StepResult::CombatOver(result, _) => {
                 assert_eq!(result.outcome, CombatOutcome::Victory);
+            }
+            other => panic!("expected combat over, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lethal_damage_to_player_ends_combat_as_defeat() {
+        let mut state = GameState::full_nibbit_combat(8);
+        let player = state.player_creature_id().unwrap();
+        let enemy = state.combat().unwrap().monster_ids()[0];
+        let mut resolver = EffectResolver::default();
+
+        resolver.enqueue(Effect::DealDamage(DamageOp {
+            source: Some(Source::Creature(enemy)),
+            dealer: Some(enemy),
+            target: player,
+            base_amount: Decimal::from(99),
+            kind: DamageKind::Attack,
+            flags: DamageFlags {
+                ignores_block: false,
+                is_attack: true,
+            },
+        }));
+        resolver.enqueue(Effect::CheckCombatEnd);
+
+        let registry = StaticRegistry::default();
+        match resolver.drain(&mut state, &registry) {
+            StepResult::CombatOver(result, _) => {
+                assert_eq!(result.outcome, CombatOutcome::Defeat);
             }
             other => panic!("expected combat over, got {other:?}"),
         }
