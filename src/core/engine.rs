@@ -120,7 +120,6 @@ fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>
         Command::EndTurn { side } => Ok(vec![
             Effect::Trigger(Event::TurnEnded { side }),
             Effect::EndTurn(side),
-            Effect::CheckCombatEnd,
         ]),
         Command::UsePotion { .. } => Ok(vec![]),
         Command::Choose { .. } => Err(CommandError::UnexpectedChoice),
@@ -150,4 +149,71 @@ pub(crate) fn combat_result_for_state(state: &GameState) -> Option<CombatResult>
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
+
+    use super::*;
+
+    #[test]
+    fn basic_nibbit_combat_runs_back_to_player_action() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(1));
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        let enemy = engine.state.combat().unwrap().monster_ids()[0];
+        let combat = engine.state.combat().unwrap();
+        let strike = combat
+            .player
+            .piles
+            .hand
+            .iter()
+            .copied()
+            .find(|card| combat.cards.get(card).unwrap().def == STRIKE_IRONCLAD)
+            .unwrap();
+        let defend = combat
+            .player
+            .piles
+            .hand
+            .iter()
+            .copied()
+            .find(|card| combat.cards.get(card).unwrap().def == DEFEND_IRONCLAD)
+            .unwrap();
+
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: defend,
+                target: None,
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.creature(player_creature).unwrap().block, 5);
+
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: strike,
+                target: Some(enemy),
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.creature(enemy).unwrap().hp, 36);
+
+        assert!(matches!(
+            engine.step(Command::EndTurn { side: Side::Player }),
+            StepResult::Done(_)
+        ));
+
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.phase, CombatPhase::PlayerAction);
+        assert_eq!(combat.player.energy, combat.player.max_energy);
+        assert_eq!(combat.player.piles.hand.len(), 2);
+
+        let player_creature = engine.state.creature(player_creature).unwrap();
+        assert_eq!(player_creature.hp, 43);
+        assert_eq!(player_creature.block, 0);
+        assert_eq!(engine.state.creature(enemy).unwrap().turns_taken, 1);
+    }
 }

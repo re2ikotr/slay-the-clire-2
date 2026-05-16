@@ -1,4 +1,6 @@
-use crate::core::effect::Effect;
+use rust_decimal::Decimal;
+
+use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey};
 use crate::core::query::{BlockCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc};
@@ -69,10 +71,77 @@ pub struct CardPlayCtx<'a> {
     pub state: &'a GameState,
 }
 
+pub const STRIKE_IRONCLAD: CardId = CardId::new("STRIKE_IRONCLAD");
+pub const DEFEND_IRONCLAD: CardId = CardId::new("DEFEND_IRONCLAD");
+
 pub fn no_card_effect(
     _ctx: &CardPlayCtx<'_>,
     _card: CardInstanceId,
     _target: Option<CreatureId>,
 ) -> Vec<Effect> {
     Vec::new()
+}
+
+pub fn strike_ironclad() -> CardDef {
+    CardDef {
+        id: STRIKE_IRONCLAD,
+        loc_key: LocKey::new("card.strike_ironclad"),
+        card_type: CardType::Attack,
+        rarity: CardRarity::Basic,
+        target: TargetType::Enemy,
+        base_costs: CardCosts::energy(1),
+        play: strike_ironclad_play,
+        rules: CardRules::default(),
+    }
+}
+
+pub fn defend_ironclad() -> CardDef {
+    CardDef {
+        id: DEFEND_IRONCLAD,
+        loc_key: LocKey::new("card.defend_ironclad"),
+        card_type: CardType::Skill,
+        rarity: CardRarity::Basic,
+        target: TargetType::SelfTarget,
+        base_costs: CardCosts::energy(1),
+        play: defend_ironclad_play,
+        rules: CardRules::default(),
+    }
+}
+
+fn strike_ironclad_play(
+    ctx: &CardPlayCtx<'_>,
+    card: CardInstanceId,
+    target: Option<CreatureId>,
+) -> Vec<Effect> {
+    let Some(target) = target else {
+        return Vec::new();
+    };
+
+    vec![Effect::DealDamage(DamageOp {
+        source: Some(Source::Card(card)),
+        dealer: ctx.state.player_creature_id(),
+        target,
+        base_amount: Decimal::from(6),
+        kind: DamageKind::Attack,
+        flags: DamageFlags {
+            ignores_block: false,
+            is_attack: true,
+        },
+    })]
+}
+
+fn defend_ironclad_play(
+    ctx: &CardPlayCtx<'_>,
+    card: CardInstanceId,
+    _target: Option<CreatureId>,
+) -> Vec<Effect> {
+    let Some(target) = ctx.state.player_creature_id() else {
+        return Vec::new();
+    };
+
+    vec![Effect::GainBlock {
+        target,
+        amount: Decimal::from(5),
+        source: Some(Source::Card(card)),
+    }]
 }

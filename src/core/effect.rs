@@ -50,6 +50,11 @@ pub enum Effect {
         player: PlayerId,
         count: u8,
     },
+    DiscardHand {
+        player: PlayerId,
+    },
+    ClearSideBlock(Side),
+    ExecuteMonsterTurn,
     MoveCard {
         card: CardInstanceId,
         to: PileId,
@@ -106,8 +111,8 @@ pub struct DamageResult {
     pub target: CreatureId,
     pub kind: DamageKind,
     pub requested: Decimal,
-    pub blocked: Decimal,
-    pub hp_loss: Decimal,
+    pub blocked: i32,
+    pub hp_loss: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

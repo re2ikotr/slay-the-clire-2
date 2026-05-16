@@ -2,18 +2,22 @@ use std::collections::VecDeque;
 
 use rust_decimal::Decimal;
 
-use crate::content::cards::CardPlayCtx;
+use crate::content::cards::{CardPlayCtx, TargetType};
 use crate::core::command::CommandError;
 use crate::core::effect::{DamageOp, DamageResult, Effect};
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
     BlockGained, CardDrawn, CreatureHpChanged, Event, PowerApplied, ResourceChanged,
 };
-use crate::core::ids::ChoiceId;
+use crate::core::ids::{ChoiceId, CreatureId};
+use crate::core::listener::ListenerRef;
 use crate::core::log::{LogEntry, StateChange};
 use crate::core::query::{BlockCalc, DamageCalc, Decision, PreventReason, ResourceCostCalc};
-use crate::core::rules::RulePipeline;
-use crate::core::state::{CardCost, CombatPhase, GameState, ResourceKind, StateError};
+use crate::core::rules::{RuleCtx, RulePipeline};
+use crate::core::state::{
+    decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileKind, ResourceKind, Side,
+    StateError,
+};
 use crate::registry::StaticRegistry;
 
 #[derive(Default)]
@@ -100,6 +104,13 @@ impl EffectResolver {
                 card,
                 target,
             } => {
+                if !state.card_is_in_pile(card, PileKind::Hand) {
+                    return ApplyResult::Rejected(CommandError::InvalidCard(card));
+                }
+                if let Err(reason) = validate_card_target(state, registry, card, target) {
+                    return ApplyResult::Rejected(CommandError::Prevented(reason));
+                }
+
                 let decision = RulePipeline::should_play(registry, state, card, target);
                 self.log.push(LogEntry::DecisionMade(decision.clone()));
                 match decision {
@@ -227,7 +238,7 @@ impl EffectResolver {
                 amount,
                 source,
             } => match state.apply_power(target, power, amount) {
-                Ok(instance) => {
+                Ok((instance, actual)) => {
                     self.log
                         .push(LogEntry::StateChanged(StateChange::PowerApplied {
                             target,
@@ -238,7 +249,7 @@ impl EffectResolver {
                             target,
                             power,
                             instance,
-                            amount,
+                            amount: actual,
                             source,
                         },
                     ))])
@@ -246,14 +257,65 @@ impl EffectResolver {
                 Err(error) => ApplyResult::StateError(error),
             },
             Effect::DrawCards { player, count } => match state.draw_cards(player, count) {
-                Ok(cards) => ApplyResult::Continue(
-                    cards
-                        .into_iter()
-                        .map(|card| Effect::Trigger(Event::CardDrawn(CardDrawn { player, card })))
-                        .collect(),
-                ),
+                Ok(cards) => {
+                    for card in &cards {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::CardMoved {
+                                card: *card,
+                                from: Some(crate::core::state::PileId {
+                                    owner: player,
+                                    kind: PileKind::Draw,
+                                }),
+                                to: crate::core::state::PileId {
+                                    owner: player,
+                                    kind: PileKind::Hand,
+                                },
+                                reason: crate::core::effect::MoveReason::Draw,
+                            }));
+                    }
+
+                    ApplyResult::Continue(
+                        cards
+                            .into_iter()
+                            .map(|card| {
+                                Effect::Trigger(Event::CardDrawn(CardDrawn { player, card }))
+                            })
+                            .collect(),
+                    )
+                }
                 Err(error) => ApplyResult::StateError(error),
             },
+            Effect::DiscardHand { player } => match state.discard_hand(player) {
+                Ok(cards) => {
+                    for card in cards {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::CardMoved {
+                                card,
+                                from: Some(crate::core::state::PileId {
+                                    owner: player,
+                                    kind: PileKind::Hand,
+                                }),
+                                to: crate::core::state::PileId {
+                                    owner: player,
+                                    kind: PileKind::Discard,
+                                },
+                                reason: crate::core::effect::MoveReason::Discard,
+                            }));
+                    }
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
+            Effect::ClearSideBlock(side) => match state.clear_side_block(side) {
+                Ok(cleared) => {
+                    self.log.extend(cleared.into_iter().map(|(target, amount)| {
+                        LogEntry::StateChanged(StateChange::BlockCleared { target, amount })
+                    }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
+            Effect::ExecuteMonsterTurn => self.execute_monster_turn(state, registry),
             Effect::MoveCard { card, to, reason } => match state.move_card(card, to) {
                 Ok(from_kind) => {
                     self.log
@@ -276,23 +338,21 @@ impl EffectResolver {
                 .unwrap_or_else(|| ApplyResult::Continue(Vec::new())),
             Effect::StartTurn(side) => {
                 let phase = match side {
-                    crate::core::state::Side::Player => CombatPhase::PlayerStart,
-                    crate::core::state::Side::Monsters => CombatPhase::EnemyAction,
+                    Side::Player => CombatPhase::PlayerStart,
+                    Side::Monsters => CombatPhase::EnemyAction,
                 };
                 match state.set_phase(phase) {
-                    Ok(()) => {
-                        ApplyResult::Continue(vec![Effect::Trigger(Event::TurnStarted { side })])
-                    }
+                    Ok(()) => ApplyResult::Continue(start_turn_effects(state, side)),
                     Err(error) => ApplyResult::StateError(error),
                 }
             }
             Effect::EndTurn(side) => {
                 let phase = match side {
-                    crate::core::state::Side::Player => CombatPhase::PlayerEnd,
-                    crate::core::state::Side::Monsters => CombatPhase::EnemyEnd,
+                    Side::Player => CombatPhase::PlayerEnd,
+                    Side::Monsters => CombatPhase::EnemyEnd,
                 };
                 match state.set_phase(phase) {
-                    Ok(()) => ApplyResult::Continue(Vec::new()),
+                    Ok(()) => ApplyResult::Continue(end_turn_effects(state, side)),
                     Err(error) => ApplyResult::StateError(error),
                 }
             }
@@ -335,21 +395,24 @@ impl EffectResolver {
         };
 
         let hp_before = creature.hp;
-        let mut blocked = Decimal::from(0);
+        let mut blocked = 0;
         let mut hp_loss = requested;
 
         if !op.flags.ignores_block {
-            blocked = if creature.block < requested {
-                creature.block
+            let blocked_decimal = if Decimal::from(creature.block) < requested {
+                Decimal::from(creature.block)
             } else {
                 requested
             };
-            creature.block -= blocked;
-            hp_loss = requested - blocked;
+            blocked = decimal_to_i32_trunc(blocked_decimal);
+            creature.block = creature.block.saturating_sub(blocked);
+            hp_loss = requested - blocked_decimal;
         }
 
-        creature.hp -= hp_loss;
+        let hp_loss_int = decimal_to_i32_trunc(hp_loss);
+        creature.hp = creature.hp.saturating_sub(hp_loss_int).max(0);
         let hp_after = creature.hp;
+        let actual_hp_loss = hp_before - hp_after;
 
         let result = DamageResult {
             source: op.source,
@@ -358,7 +421,7 @@ impl EffectResolver {
             kind: op.kind,
             requested,
             blocked,
-            hp_loss,
+            hp_loss: actual_hp_loss,
         };
 
         self.log
@@ -376,6 +439,62 @@ impl EffectResolver {
             Effect::Trigger(Event::DamageDealt(result)),
             Effect::CheckDeaths,
         ])
+    }
+
+    fn execute_monster_turn(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+    ) -> ApplyResult {
+        let monsters = state
+            .combat()
+            .map(|combat| {
+                combat
+                    .creatures
+                    .iter()
+                    .filter(|creature| creature.side == Side::Monsters && creature.alive)
+                    .map(|creature| creature.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        for monster in monsters {
+            let Some(effects) = monster_action_effects(state, registry, monster) else {
+                continue;
+            };
+
+            if let Err(error) = state.increment_turns_taken(monster) {
+                return ApplyResult::StateError(error);
+            }
+
+            match self.apply_immediate_effects(state, registry, effects) {
+                ApplyResult::Continue(_) => {}
+                result => return result,
+            }
+
+            if let Some(result) = combat_result_for_state(state) {
+                return ApplyResult::CombatOver(result);
+            }
+        }
+
+        ApplyResult::Continue(vec![Effect::EndTurn(Side::Monsters)])
+    }
+
+    fn apply_immediate_effects(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        effects: Vec<Effect>,
+    ) -> ApplyResult {
+        let mut local = VecDeque::from(effects);
+        while let Some(effect) = local.pop_front() {
+            self.log.push(LogEntry::EffectStarted(effect.clone()));
+            match self.apply_effect(state, registry, effect) {
+                ApplyResult::Continue(more) => local.extend(more),
+                other => return other,
+            }
+        }
+        ApplyResult::Continue(Vec::new())
     }
 
     fn resolve_card_payment(
@@ -535,6 +654,130 @@ fn command_error_from_state(error: StateError) -> CommandError {
     }
 }
 
+fn validate_card_target(
+    state: &GameState,
+    registry: &StaticRegistry,
+    card: crate::core::ids::CardInstanceId,
+    target: Option<CreatureId>,
+) -> Result<(), PreventReason> {
+    let Some(card_state) = state.card(card) else {
+        return Err(PreventReason::CannotPlay);
+    };
+    let Some(def) = registry.cards.get(card_state.def) else {
+        return Ok(());
+    };
+
+    match def.target {
+        TargetType::None => {
+            if target.is_none() {
+                Ok(())
+            } else {
+                Err(PreventReason::NoValidTarget)
+            }
+        }
+        TargetType::Enemy => {
+            let Some(target) = target else {
+                return Err(PreventReason::NoValidTarget);
+            };
+            match state.creature(target) {
+                Some(creature) if creature.side == Side::Monsters && creature.alive => Ok(()),
+                _ => Err(PreventReason::NoValidTarget),
+            }
+        }
+        TargetType::AllEnemies => Ok(()),
+        TargetType::SelfTarget => {
+            if target.is_none() || target == state.player_creature_id() {
+                Ok(())
+            } else {
+                Err(PreventReason::NoValidTarget)
+            }
+        }
+        TargetType::AnyCreature => {
+            let Some(target) = target else {
+                return Err(PreventReason::NoValidTarget);
+            };
+            match state.creature(target) {
+                Some(creature) if creature.alive => Ok(()),
+                _ => Err(PreventReason::NoValidTarget),
+            }
+        }
+    }
+}
+
+fn start_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
+    let mut effects = vec![
+        Effect::Trigger(Event::TurnStarted { side }),
+        Effect::ClearSideBlock(side),
+    ];
+
+    match side {
+        Side::Player => {
+            if let Some(combat) = state.combat() {
+                let player = combat.player.id;
+                let diff = combat.player.max_energy - combat.player.energy;
+                if diff > 0 {
+                    effects.push(Effect::GainResource {
+                        player,
+                        resource: ResourceKind::Energy,
+                        amount: diff,
+                    });
+                } else if diff < 0 {
+                    effects.push(Effect::SpendResource {
+                        player,
+                        resource: ResourceKind::Energy,
+                        amount: -diff,
+                    });
+                }
+                effects.push(Effect::DrawCards { player, count: 5 });
+            }
+            effects.push(Effect::EnterPhase(CombatPhase::PlayerAction));
+        }
+        Side::Monsters => effects.push(Effect::ExecuteMonsterTurn),
+    }
+
+    effects
+}
+
+fn end_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
+    match side {
+        Side::Player => state
+            .player_id()
+            .map(|player| {
+                vec![
+                    Effect::DiscardHand { player },
+                    Effect::CheckCombatEnd,
+                    Effect::StartTurn(Side::Monsters),
+                ]
+            })
+            .unwrap_or_default(),
+        Side::Monsters => vec![
+            Effect::Trigger(Event::TurnEnded {
+                side: Side::Monsters,
+            }),
+            Effect::CheckCombatEnd,
+            Effect::StartTurn(Side::Player),
+        ],
+    }
+}
+
+fn monster_action_effects(
+    state: &GameState,
+    registry: &StaticRegistry,
+    monster: CreatureId,
+) -> Option<Vec<Effect>> {
+    let creature = state.creature(monster)?;
+    if !creature.alive {
+        return None;
+    }
+    let model = creature.model?;
+    let def = registry.monsters.get(model)?;
+    let ctx = RuleCtx {
+        state,
+        listener: Some(ListenerRef::Monster(monster)),
+    };
+    Some((def.act)(&ctx, monster))
+}
+
 enum ApplyResult {
     Continue(Vec<Effect>),
     NeedChoice(crate::core::effect::ChoiceRequest),
@@ -612,7 +855,7 @@ mod tests {
             .state
             .combat()
             .and_then(|combat| combat.powers.get(&power))
-            .map(|instance| instance.amount)
+            .map(|instance| Decimal::from(instance.amount))
             .unwrap_or_default();
         calc.amount += amount;
         calc
@@ -753,7 +996,7 @@ mod tests {
 
         assert!(matches!(result, StepResult::Done(_)));
         let enemy = engine.state.creature(target).unwrap();
-        assert_eq!(enemy.hp, Decimal::from(24));
+        assert_eq!(enemy.hp, 24);
     }
 
     #[test]
@@ -786,7 +1029,7 @@ mod tests {
             .iter()
             .any(|entry| matches!(entry, crate::core::log::LogEntry::ModifierApplied(_))));
         let enemy = engine.state.creature(target).unwrap();
-        assert_eq!(enemy.hp, Decimal::from(22));
+        assert_eq!(enemy.hp, 22);
     }
 
     #[test]
@@ -818,6 +1061,6 @@ mod tests {
         assert!(matches!(result, StepResult::Done(_)));
         let creature = state.creature(target).unwrap();
         assert!(creature.alive);
-        assert!(creature.hp <= Decimal::from(0));
+        assert!(creature.hp == 0);
     }
 }

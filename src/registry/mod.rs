@@ -96,11 +96,43 @@ impl RegistryDef for MonsterDef {
     }
 }
 
-#[derive(Default)]
 pub struct StaticRegistry {
     pub cards: DefRegistry<CardId, CardDef>,
     pub powers: DefRegistry<PowerId, PowerDef>,
     pub relics: DefRegistry<RelicId, RelicDef>,
     pub potions: DefRegistry<PotionId, PotionDef>,
     pub monsters: DefRegistry<MonsterId, MonsterDef>,
+}
+
+impl StaticRegistry {
+    pub fn empty() -> Self {
+        Self {
+            cards: DefRegistry::default(),
+            powers: DefRegistry::default(),
+            relics: DefRegistry::default(),
+            potions: DefRegistry::default(),
+            monsters: DefRegistry::default(),
+        }
+    }
+
+    pub fn standard() -> Self {
+        let mut registry = Self::empty();
+        registry
+            .cards
+            .register(crate::content::cards::strike_ironclad());
+        registry
+            .cards
+            .register(crate::content::cards::defend_ironclad());
+        registry.powers.register(crate::content::powers::strength());
+        registry
+            .monsters
+            .register(crate::content::monsters::nibbit());
+        registry
+    }
+}
+
+impl Default for StaticRegistry {
+    fn default() -> Self {
+        Self::standard()
+    }
 }

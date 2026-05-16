@@ -71,8 +71,6 @@ pub fn collect_combat_listeners(state: &GameState, _scope: ListenerScope) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use rust_decimal::Decimal;
-
     use crate::core::ids::{
         ModifierInstanceId, PotionId, PotionInstanceId, PowerId, PowerInstanceId, RelicId,
         RelicInstanceId,
@@ -101,7 +99,7 @@ mod tests {
                 id: player_power,
                 def: PowerId::new("player_power"),
                 owner: player_creature,
-                amount: Decimal::from(1),
+                amount: 1,
             },
         );
         combat.powers.insert(
@@ -110,7 +108,7 @@ mod tests {
                 id: enemy_power,
                 def: PowerId::new("enemy_power"),
                 owner: enemy,
-                amount: Decimal::from(1),
+                amount: 1,
             },
         );
         combat

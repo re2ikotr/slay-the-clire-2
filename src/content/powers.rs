@@ -1,3 +1,5 @@
+use rust_decimal::Decimal;
+
 use crate::core::effect::Effect;
 use crate::core::event::Event;
 use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
@@ -28,4 +30,41 @@ pub struct PowerRules {
     pub modify_block_multiplicative: Option<PowerModifyBlockFn>,
     pub modify_resource_cost: Option<PowerModifyResourceCostFn>,
     pub decide: Option<PowerDecisionFn>,
+}
+
+pub const STRENGTH: PowerId = PowerId::new("STRENGTH");
+
+pub fn strength() -> PowerDef {
+    PowerDef {
+        id: STRENGTH,
+        loc_key: LocKey::new("power.strength"),
+        rules: PowerRules {
+            modify_damage_additive: Some(strength_modify_damage_additive),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn strength_modify_damage_additive(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: DamageCalc,
+) -> DamageCalc {
+    let Some(instance) = ctx
+        .state
+        .combat()
+        .and_then(|combat| combat.powers.get(&power))
+    else {
+        return calc;
+    };
+
+    if calc.dealer == Some(instance.owner) {
+        calc.amount += Decimal::from(instance.amount);
+    }
+
+    if calc.amount < Decimal::from(0) {
+        calc.amount = Decimal::from(0);
+    }
+
+    calc
 }

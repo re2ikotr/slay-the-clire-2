@@ -3,6 +3,8 @@ use std::fmt;
 
 use rust_decimal::Decimal;
 
+use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
+use crate::content::monsters::NIBBIT;
 use crate::core::ids::{
     CardId, CardInstanceId, CombatId, CreatureId, ModifierInstanceId, MonsterId, PlayerId,
     PotionId, PotionInstanceId, PowerId, PowerInstanceId, RelicId, RelicInstanceId,
@@ -140,7 +142,7 @@ pub struct PowerInstance {
     pub id: PowerInstanceId,
     pub def: PowerId,
     pub owner: CreatureId,
-    pub amount: Decimal,
+    pub amount: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,24 +162,26 @@ pub struct Creature {
     pub id: CreatureId,
     pub model: Option<MonsterId>,
     pub side: Side,
-    pub hp: Decimal,
-    pub max_hp: Decimal,
-    pub block: Decimal,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub block: i32,
     pub powers: Vec<PowerInstanceId>,
     pub alive: bool,
+    pub turns_taken: u32,
 }
 
 impl Creature {
-    pub fn new(id: CreatureId, side: Side, max_hp: Decimal) -> Self {
+    pub fn new(id: CreatureId, side: Side, max_hp: i32) -> Self {
         Self {
             id,
             model: None,
             side,
             hp: max_hp,
             max_hp,
-            block: Decimal::from(0),
+            block: 0,
             powers: Vec::new(),
             alive: true,
+            turns_taken: 0,
         }
     }
 
@@ -373,8 +377,75 @@ impl GameState {
                 piles,
             },
             creatures: vec![
-                Creature::new(player_creature, Side::Player, Decimal::from(50)),
-                Creature::new(enemy, Side::Monsters, Decimal::from(30)),
+                Creature::new(player_creature, Side::Player, 50),
+                Creature::new(enemy, Side::Monsters, 30),
+            ],
+            cards,
+            powers: BTreeMap::new(),
+            relics: BTreeMap::new(),
+            potions: BTreeMap::new(),
+            modifiers: Vec::new(),
+            next_power_instance: 1,
+        };
+
+        Self::with_combat(seed, combat)
+    }
+
+    pub fn basic_nibbit_combat(seed: u64) -> Self {
+        let player_id = PlayerId::new(1);
+        let player_creature = CreatureId::new(1);
+        let enemy = CreatureId::new(2);
+        let strike = CardInstanceId::new(1);
+        let defend = CardInstanceId::new(2);
+        let hand = PileId::player(player_id, PileKind::Hand);
+
+        let mut cards = BTreeMap::new();
+        cards.insert(
+            strike,
+            CardInstance {
+                id: strike,
+                def: STRIKE_IRONCLAD,
+                owner: player_id,
+                upgraded: false,
+                costs: CardCosts::energy(1),
+                temp_costs: TemporaryCardCosts::default(),
+                pile: hand,
+                flags: CardFlags::default(),
+            },
+        );
+        cards.insert(
+            defend,
+            CardInstance {
+                id: defend,
+                def: DEFEND_IRONCLAD,
+                owner: player_id,
+                upgraded: false,
+                costs: CardCosts::energy(1),
+                temp_costs: TemporaryCardCosts::default(),
+                pile: hand,
+                flags: CardFlags::default(),
+            },
+        );
+
+        let mut piles = CardPiles::default();
+        piles.hand.extend([strike, defend]);
+
+        let combat = CombatState {
+            id: CombatId::new(1),
+            phase: CombatPhase::PlayerAction,
+            player: PlayerState {
+                id: player_id,
+                creature: player_creature,
+                energy: 3,
+                max_energy: 3,
+                stars: 0,
+                relics: Vec::new(),
+                potions: Vec::new(),
+                piles,
+            },
+            creatures: vec![
+                Creature::new(player_creature, Side::Player, 50),
+                Creature::new(enemy, Side::Monsters, 42).with_model(NIBBIT),
             ],
             cards,
             powers: BTreeMap::new(),
@@ -421,6 +492,12 @@ impl GameState {
 
     pub fn card(&self, id: CardInstanceId) -> Option<&CardInstance> {
         self.combat.as_ref()?.cards.get(&id)
+    }
+
+    pub fn card_is_in_pile(&self, id: CardInstanceId, pile: PileKind) -> bool {
+        self.card(id)
+            .map(|card| card.pile.kind == pile)
+            .unwrap_or(false)
     }
 
     pub fn resource_amount(
@@ -490,16 +567,13 @@ impl GameState {
         Ok(())
     }
 
-    pub fn gain_block(
-        &mut self,
-        target: CreatureId,
-        amount: Decimal,
-    ) -> Result<Decimal, StateError> {
+    pub fn gain_block(&mut self, target: CreatureId, amount: Decimal) -> Result<i32, StateError> {
         let creature = self
             .creature_mut(target)
             .ok_or(StateError::UnknownCreature(target))?;
         let before = creature.block;
-        creature.block += amount;
+        let gained = decimal_to_i32_trunc(amount);
+        creature.block = creature.block.saturating_add(gained).min(999_999_999);
         Ok(creature.block - before)
     }
 
@@ -534,6 +608,7 @@ impl GameState {
         player: PlayerId,
         count: u8,
     ) -> Result<Vec<CardInstanceId>, StateError> {
+        let rng = &mut self.rng.shuffle;
         let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
         if combat.player.id != player {
             return Err(StateError::UnknownPlayer(player));
@@ -541,6 +616,17 @@ impl GameState {
 
         let mut drawn = Vec::new();
         for _ in 0..count {
+            if combat.player.piles.draw.is_empty() && !combat.player.piles.discard.is_empty() {
+                let mut cards = std::mem::take(&mut combat.player.piles.discard);
+                rng.shuffle(&mut cards);
+                for card in &cards {
+                    if let Some(card_state) = combat.cards.get_mut(card) {
+                        card_state.pile = PileId::player(player, PileKind::Draw);
+                    }
+                }
+                combat.player.piles.draw = cards;
+            }
+
             let Some(card) = combat.player.piles.draw.pop() else {
                 break;
             };
@@ -553,13 +639,58 @@ impl GameState {
         Ok(drawn)
     }
 
+    pub fn discard_hand(&mut self, player: PlayerId) -> Result<Vec<CardInstanceId>, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+
+        let cards = std::mem::take(&mut combat.player.piles.hand);
+        for card in &cards {
+            combat.player.piles.discard.push(*card);
+            if let Some(card_state) = combat.cards.get_mut(card) {
+                card_state.pile = PileId::player(player, PileKind::Discard);
+            }
+        }
+
+        Ok(cards)
+    }
+
+    pub fn clear_side_block(&mut self, side: Side) -> Result<Vec<(CreatureId, i32)>, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let mut cleared = Vec::new();
+
+        for creature in combat
+            .creatures
+            .iter_mut()
+            .filter(|creature| creature.side == side && creature.alive)
+        {
+            if creature.block > 0 {
+                let amount = creature.block;
+                creature.block = 0;
+                cleared.push((creature.id, amount));
+            }
+        }
+
+        Ok(cleared)
+    }
+
+    pub fn increment_turns_taken(&mut self, creature: CreatureId) -> Result<(), StateError> {
+        let creature = self
+            .creature_mut(creature)
+            .ok_or(StateError::UnknownCreature(creature))?;
+        creature.turns_taken += 1;
+        Ok(())
+    }
+
     pub fn apply_power(
         &mut self,
         target: CreatureId,
         power: PowerId,
         amount: Decimal,
-    ) -> Result<PowerInstanceId, StateError> {
+    ) -> Result<(PowerInstanceId, i32), StateError> {
         let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let amount = decimal_to_i32_trunc(amount);
         let target_index = combat
             .creatures
             .iter()
@@ -582,7 +713,7 @@ impl GameState {
             if let Some(instance) = combat.powers.get_mut(&existing) {
                 instance.amount += amount;
             }
-            return Ok(existing);
+            return Ok((existing, amount));
         }
 
         let id = combat.alloc_power_instance_id();
@@ -596,7 +727,7 @@ impl GameState {
             },
         );
         combat.creatures[target_index].powers.push(id);
-        Ok(id)
+        Ok((id, amount))
     }
 
     pub fn death_candidates(&self) -> Vec<CreatureId> {
@@ -606,7 +737,7 @@ impl GameState {
                 combat
                     .creatures
                     .iter()
-                    .filter(|creature| creature.alive && creature.hp <= Decimal::from(0))
+                    .filter(|creature| creature.alive && creature.hp <= 0)
                     .map(|creature| creature.id)
                     .collect()
             })
@@ -626,6 +757,16 @@ impl GameState {
         combat.phase = phase;
         Ok(())
     }
+}
+
+pub(crate) fn decimal_to_i32_trunc(value: Decimal) -> i32 {
+    i32::try_from(value.trunc()).unwrap_or_else(|_| {
+        if value < Decimal::from(0) {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,5 +1,3 @@
-use rust_decimal::Decimal;
-
 use crate::core::effect::{DamageResult, Source};
 use crate::core::ids::{CardInstanceId, CreatureId, PlayerId, PowerId, PowerInstanceId};
 use crate::core::state::{ResourceKind, Side};
@@ -45,7 +43,7 @@ pub struct CardPlayed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockGained {
     pub target: CreatureId,
-    pub amount: Decimal,
+    pub amount: i32,
     pub source: Option<Source>,
 }
 
@@ -54,7 +52,7 @@ pub struct PowerApplied {
     pub target: CreatureId,
     pub power: PowerId,
     pub instance: PowerInstanceId,
-    pub amount: Decimal,
+    pub amount: i32,
     pub source: Option<Source>,
 }
 
@@ -68,7 +66,7 @@ pub struct ResourceChanged {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CreatureHpChanged {
     pub creature: CreatureId,
-    pub before: Decimal,
-    pub after: Decimal,
+    pub before: i32,
+    pub after: i32,
     pub source: Option<Source>,
 }

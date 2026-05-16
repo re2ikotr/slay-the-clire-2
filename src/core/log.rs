@@ -32,7 +32,11 @@ pub enum StateChange {
     DamageApplied(DamageResult),
     BlockGained {
         target: CreatureId,
-        amount: rust_decimal::Decimal,
+        amount: i32,
+    },
+    BlockCleared {
+        target: CreatureId,
+        amount: i32,
     },
     PowerApplied {
         target: CreatureId,
