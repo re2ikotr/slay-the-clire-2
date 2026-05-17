@@ -11,6 +11,9 @@ use crate::core::ids::{
 };
 use crate::core::rng::RngSet;
 
+pub const MAX_CARDS_IN_HAND: usize = 10;
+pub const BASE_HAND_DRAW_COUNT: u8 = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Side {
     Player,
@@ -344,6 +347,19 @@ pub struct RunState {
     pub seed: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CombatSetupCard {
+    pub def: CardId,
+    pub upgraded: bool,
+    pub costs: CardCosts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CombatSetupMonster {
+    pub model: Option<MonsterId>,
+    pub max_hp: i32,
+}
+
 #[derive(Clone, Debug)]
 pub struct GameState {
     pub run: RunState,
@@ -365,6 +381,103 @@ impl GameState {
             run: RunState { seed },
             combat: Some(combat),
             rng: RngSet::seeded(seed),
+        }
+    }
+
+    pub fn single_player_test_combat(
+        seed: u64,
+        deck: impl IntoIterator<Item = CombatSetupCard>,
+        monsters: impl IntoIterator<Item = CombatSetupMonster>,
+        player_max_hp: i32,
+        player_max_energy: i32,
+        initial_draw_count: u8,
+    ) -> Self {
+        let player_id = PlayerId::new(1);
+        let player_creature = CreatureId::new(1);
+        let draw = PileId::player(player_id, PileKind::Draw);
+        let hand = PileId::player(player_id, PileKind::Hand);
+
+        let mut cards = BTreeMap::new();
+        let mut draw_cards = Vec::new();
+        let mut next_card_instance = 1;
+        for setup in deck {
+            let id = CardInstanceId::new(next_card_instance);
+            next_card_instance += 1;
+            cards.insert(
+                id,
+                CardInstance {
+                    id,
+                    def: setup.def,
+                    owner: player_id,
+                    upgraded: setup.upgraded,
+                    costs: setup.costs,
+                    temp_costs: TemporaryCardCosts::default(),
+                    pile: draw,
+                    flags: CardFlags::default(),
+                },
+            );
+            draw_cards.push(id);
+        }
+
+        let mut rng = RngSet::seeded(seed);
+        rng.shuffle.shuffle(&mut draw_cards);
+
+        let mut hand_cards = Vec::new();
+        for _ in 0..usize::from(initial_draw_count).min(MAX_CARDS_IN_HAND) {
+            let Some(card) = draw_cards.pop() else {
+                break;
+            };
+            if let Some(card_state) = cards.get_mut(&card) {
+                card_state.pile = hand;
+            }
+            hand_cards.push(card);
+        }
+
+        let mut creatures = vec![Creature::new(player_creature, Side::Player, player_max_hp)];
+        let mut next_creature = 2;
+        for monster in monsters {
+            let id = CreatureId::new(next_creature);
+            next_creature += 1;
+            let mut creature = Creature::new(id, Side::Monsters, monster.max_hp);
+            if let Some(model) = monster.model {
+                creature = creature.with_model(model);
+            }
+            creatures.push(creature);
+        }
+
+        let mut piles = CardPiles::default();
+        piles.draw = draw_cards;
+        piles.hand = hand_cards;
+
+        let combat = CombatState {
+            id: CombatId::new(1),
+            phase: CombatPhase::PlayerAction,
+            player: PlayerState {
+                id: player_id,
+                creature: player_creature,
+                energy: player_max_energy,
+                max_energy: player_max_energy,
+                stars: 0,
+                relics: Vec::new(),
+                potions: Vec::new(),
+                piles,
+            },
+            creatures,
+            cards,
+            powers: BTreeMap::new(),
+            relics: BTreeMap::new(),
+            potions: BTreeMap::new(),
+            modifiers: Vec::new(),
+            turn_stats: CombatTurnStats::default(),
+            combat_stats: CombatStats::default(),
+            next_card_instance,
+            next_power_instance: 1,
+        };
+
+        Self {
+            run: RunState { seed },
+            combat: Some(combat),
+            rng,
         }
     }
 
@@ -894,6 +1007,9 @@ impl GameState {
         let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
         if combat.player.id != player {
             return Err(StateError::UnknownPlayer(player));
+        }
+        if combat.player.piles.hand.len() >= MAX_CARDS_IN_HAND {
+            return Ok(None);
         }
 
         let Some(card) = combat.player.piles.draw.pop() else {

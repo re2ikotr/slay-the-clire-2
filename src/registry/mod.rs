@@ -17,6 +17,18 @@ pub struct DefRegistry<Id, Def> {
     defs: BTreeMap<Id, Def>,
 }
 
+impl<Id, Def> Clone for DefRegistry<Id, Def>
+where
+    Id: Clone + Ord,
+    Def: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            defs: self.defs.clone(),
+        }
+    }
+}
+
 impl<Id, Def> Default for DefRegistry<Id, Def> {
     fn default() -> Self {
         Self {
@@ -106,6 +118,18 @@ pub struct StaticRegistry {
     pub relics: DefRegistry<RelicId, RelicDef>,
     pub potions: DefRegistry<PotionId, PotionDef>,
     pub monsters: DefRegistry<MonsterId, MonsterDef>,
+}
+
+impl Clone for StaticRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            cards: self.cards.clone(),
+            powers: self.powers.clone(),
+            relics: self.relics.clone(),
+            potions: self.potions.clone(),
+            monsters: self.monsters.clone(),
+        }
+    }
 }
 
 impl StaticRegistry {

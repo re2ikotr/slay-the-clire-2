@@ -71,6 +71,10 @@ pub enum Effect {
         player: PlayerId,
         count: u8,
     },
+    DrawHandCards {
+        player: PlayerId,
+        count: u8,
+    },
     DrawUntilNonAttack {
         player: PlayerId,
     },

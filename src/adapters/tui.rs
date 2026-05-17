@@ -1,0 +1,860 @@
+use std::collections::VecDeque;
+use std::io::{self, Write};
+
+use crate::adapters::log_store::StepLogSink;
+use crate::assets::{Language, Localization};
+use crate::content::cards::TargetType;
+use crate::content::monsters::NIBBIT;
+use crate::core::ids::{CardInstanceId, CreatureId};
+use crate::core::rules::RuleCtx;
+use crate::core::state::{
+    CardCost, CardCosts, CombatPhase, CombatSetupCard, CombatSetupMonster, GameState, PileKind,
+    Side, BASE_HAND_DRAW_COUNT, MAX_CARDS_IN_HAND,
+};
+use crate::core::{Command, Engine, StepResult};
+use crate::registry::StaticRegistry;
+
+const TEST_DECK_SIZE: usize = 25;
+const PLAYER_MAX_HP: i32 = 80;
+const PLAYER_MAX_ENERGY: i32 = 3;
+const MAX_MESSAGES: usize = 8;
+
+pub fn run() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let plain = args.iter().any(|arg| arg == "--plain") || should_fallback_to_plain();
+    let seed = parse_seed(&args).unwrap_or(0);
+    let language = parse_language(&args).unwrap_or_else(Language::from_env);
+
+    let registry = StaticRegistry::standard();
+    let mut app = TuiApp::new(LocalCombatDriver::new(registry, seed), language);
+    let mut renderer: Box<dyn CombatRenderer> = if plain {
+        Box::new(PlainRenderer)
+    } else {
+        Box::new(AnsiRenderer)
+    };
+
+    if let Err(error) = app.run(&mut *renderer) {
+        eprintln!("tui error: {error}");
+    }
+}
+
+fn parse_seed(args: &[String]) -> Option<u64> {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("--seed="))
+        .and_then(|value| value.parse().ok())
+}
+
+fn parse_language(args: &[String]) -> Option<Language> {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("--lang="))
+        .and_then(Language::from_code)
+}
+
+fn should_fallback_to_plain() -> bool {
+    std::env::var("TERM")
+        .map(|term| term == "dumb")
+        .unwrap_or(false)
+}
+
+struct TuiApp<D> {
+    driver: D,
+    loc: Localization,
+    messages: VecDeque<String>,
+}
+
+impl<D: CombatDriver> TuiApp<D> {
+    fn new(driver: D, language: Language) -> Self {
+        let loc = Localization::new(language);
+        let mut messages = VecDeque::new();
+        messages.push_back(loc.ui("help.compact").to_string());
+        Self {
+            driver,
+            loc,
+            messages,
+        }
+    }
+
+    fn run(&mut self, renderer: &mut dyn CombatRenderer) -> io::Result<()> {
+        let mut input = String::new();
+        loop {
+            let snapshot = self.driver.snapshot(&self.loc);
+            renderer.render(&snapshot, &self.messages, &self.loc)?;
+
+            print!("> ");
+            io::stdout().flush()?;
+            input.clear();
+            if io::stdin().read_line(&mut input)? == 0 {
+                return Ok(());
+            }
+
+            match parse_input(input.trim(), &self.loc) {
+                UiInput::Quit => return Ok(()),
+                UiInput::Help => self.push_message(self.loc.ui("help.full").to_string()),
+                UiInput::SetLanguage(language) => {
+                    self.loc.set_language(language);
+                    self.push_message(self.loc.format_language_changed());
+                }
+                UiInput::Restart => {
+                    let result = self.driver.submit(CombatUiAction::Restart, &self.loc);
+                    self.push_messages(result.messages);
+                }
+                UiInput::EndTurn => {
+                    let result = self.driver.submit(CombatUiAction::EndTurn, &self.loc);
+                    self.push_messages(result.messages);
+                }
+                UiInput::Play { hand, monster } => {
+                    let result = self.driver.submit(
+                        CombatUiAction::PlayHandCard {
+                            hand_index: hand,
+                            monster_index: monster,
+                        },
+                        &self.loc,
+                    );
+                    self.push_messages(result.messages);
+                }
+                UiInput::Empty => {}
+                UiInput::Invalid(message) => self.push_message(message),
+            }
+        }
+    }
+
+    fn push_messages(&mut self, messages: Vec<String>) {
+        for message in messages {
+            self.push_message(message);
+        }
+    }
+
+    fn push_message(&mut self, message: String) {
+        if self.messages.len() == MAX_MESSAGES {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(message);
+    }
+}
+
+enum UiInput {
+    Empty,
+    Help,
+    SetLanguage(Language),
+    Quit,
+    Restart,
+    EndTurn,
+    Play { hand: usize, monster: Option<usize> },
+    Invalid(String),
+}
+
+fn parse_input(input: &str, loc: &Localization) -> UiInput {
+    if input.is_empty() {
+        return UiInput::Empty;
+    }
+    match input {
+        "?" | "h" | "help" => return UiInput::Help,
+        "q" | "quit" => return UiInput::Quit,
+        "r" | "restart" => return UiInput::Restart,
+        "e" | "end" | "endturn" => return UiInput::EndTurn,
+        _ => {}
+    }
+
+    let mut parts = input.split_whitespace();
+    let Some(card) = parts.next() else {
+        return UiInput::Empty;
+    };
+    if matches!(card, "lang" | "language") {
+        return match parts.next().and_then(Language::from_code) {
+            Some(language) => UiInput::SetLanguage(language),
+            None => UiInput::Invalid(loc.ui("error.language_usage").to_string()),
+        };
+    }
+    let hand = match card.parse::<usize>() {
+        Ok(0) => return UiInput::Invalid(loc.ui("error.card_index_starts_at_one").to_string()),
+        Ok(value) => value - 1,
+        Err(_) => return UiInput::Invalid(loc.format_unknown_command(input)),
+    };
+    let monster = match parts.next() {
+        Some(value) => match value.parse::<usize>() {
+            Ok(0) => {
+                return UiInput::Invalid(loc.ui("error.monster_index_starts_at_one").to_string())
+            }
+            Ok(value) => Some(value - 1),
+            Err(_) => return UiInput::Invalid(loc.format_invalid_monster_index(value)),
+        },
+        None => None,
+    };
+    UiInput::Play { hand, monster }
+}
+
+trait CombatDriver {
+    fn snapshot(&self, loc: &Localization) -> CombatSnapshot;
+    fn submit(&mut self, action: CombatUiAction, loc: &Localization) -> UiStepResult;
+}
+
+enum CombatUiAction {
+    PlayHandCard {
+        hand_index: usize,
+        monster_index: Option<usize>,
+    },
+    EndTurn,
+    Restart,
+}
+
+struct UiStepResult {
+    messages: Vec<String>,
+}
+
+struct LocalCombatDriver {
+    registry: StaticRegistry,
+    engine: Engine,
+    seed: u64,
+    log_sink: Option<StepLogSink>,
+}
+
+impl LocalCombatDriver {
+    fn new(registry: StaticRegistry, seed: u64) -> Self {
+        let engine = build_test_engine(&registry, seed);
+        Self {
+            registry,
+            engine,
+            seed,
+            log_sink: create_log_sink("tui"),
+        }
+    }
+
+    fn restart(&mut self) {
+        self.seed = self.seed.wrapping_add(1);
+        self.engine = build_test_engine(&self.registry, self.seed);
+        self.record_note("restart", &format!("seed: {}", self.seed));
+    }
+
+    fn record_step(&mut self, label: &str, result: &StepResult) {
+        if let Some(sink) = self.log_sink.as_mut() {
+            if let Err(error) = sink.record_step(label, result) {
+                eprintln!("failed to write step log: {error}");
+                self.log_sink = None;
+            }
+        }
+    }
+
+    fn record_note(&mut self, label: &str, note: &str) {
+        if let Some(sink) = self.log_sink.as_mut() {
+            if let Err(error) = sink.record_note(label, note) {
+                eprintln!("failed to write step log: {error}");
+                self.log_sink = None;
+            }
+        }
+    }
+}
+
+impl CombatDriver for LocalCombatDriver {
+    fn snapshot(&self, loc: &Localization) -> CombatSnapshot {
+        CombatSnapshot::from_engine(&self.engine, loc)
+    }
+
+    fn submit(&mut self, action: CombatUiAction, loc: &Localization) -> UiStepResult {
+        match action {
+            CombatUiAction::Restart => {
+                self.restart();
+                UiStepResult {
+                    messages: vec![loc.format_started_test_combat(self.seed)],
+                }
+            }
+            CombatUiAction::EndTurn => {
+                let result = self.engine.step(Command::EndTurn { side: Side::Player });
+                self.record_step(loc.ui("action.end_turn"), &result);
+                UiStepResult {
+                    messages: summarize_step(loc.ui("action.end_turn"), result, loc),
+                }
+            }
+            CombatUiAction::PlayHandCard {
+                hand_index,
+                monster_index,
+            } => {
+                let Some(combat) = self.engine.state.combat() else {
+                    return UiStepResult {
+                        messages: vec![loc.ui("error.no_active_combat").to_string()],
+                    };
+                };
+                if combat.phase != CombatPhase::PlayerAction {
+                    return UiStepResult {
+                        messages: vec![loc.ui("error.not_player_action_phase").to_string()],
+                    };
+                }
+                let Some(card) = combat.player.piles.hand.get(hand_index).copied() else {
+                    return UiStepResult {
+                        messages: vec![loc.format_no_card_at_hand_index(hand_index + 1)],
+                    };
+                };
+                let target = resolve_target(&self.engine, card, monster_index);
+                let player = combat.player.id;
+                let label = card_label(&self.engine, card, loc);
+                let result = self.engine.step(Command::PlayCard {
+                    player,
+                    card,
+                    target,
+                });
+                self.record_step(&loc.format_play_card(&label), &result);
+                UiStepResult {
+                    messages: summarize_step(&loc.format_play_card(&label), result, loc),
+                }
+            }
+        }
+    }
+}
+
+fn create_log_sink(session: &str) -> Option<StepLogSink> {
+    match StepLogSink::create(session) {
+        Ok(sink) => Some(sink),
+        Err(error) => {
+            eprintln!("log disabled: {error}");
+            None
+        }
+    }
+}
+
+fn build_test_engine(registry: &StaticRegistry, seed: u64) -> Engine {
+    let deck = random_test_deck(registry, seed, TEST_DECK_SIZE);
+    let monster = registry
+        .monsters
+        .get(NIBBIT)
+        .map(|def| CombatSetupMonster {
+            model: Some(def.id),
+            max_hp: def.max_hp,
+        })
+        .unwrap_or(CombatSetupMonster {
+            model: None,
+            max_hp: 42,
+        });
+    let state = GameState::single_player_test_combat(
+        seed,
+        deck,
+        [monster],
+        PLAYER_MAX_HP,
+        PLAYER_MAX_ENERGY,
+        BASE_HAND_DRAW_COUNT,
+    );
+    Engine::with_registry(state, registry.clone())
+}
+
+fn random_test_deck(registry: &StaticRegistry, seed: u64, count: usize) -> Vec<CombatSetupCard> {
+    let candidates = registry
+        .cards
+        .values()
+        .filter(|def| def.can_generate_in_combat)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut rng = crate::core::rng::RngSet::seeded(seed);
+    let mut deck = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some(index) = rng.combat_card_generation.next_usize(candidates.len()) else {
+            break;
+        };
+        let def = candidates[index];
+        deck.push(CombatSetupCard {
+            def: def.id,
+            upgraded: false,
+            costs: def.costs_for(false),
+        });
+    }
+    deck
+}
+
+fn resolve_target(
+    engine: &Engine,
+    card: CardInstanceId,
+    monster_index: Option<usize>,
+) -> Option<CreatureId> {
+    let combat = engine.state.combat()?;
+    let monster_ids = combat
+        .creatures
+        .iter()
+        .filter(|creature| creature.side == Side::Monsters && creature.alive)
+        .map(|creature| creature.id)
+        .collect::<Vec<_>>();
+
+    let explicit_monster = monster_index.and_then(|index| monster_ids.get(index).copied());
+    let target_type = engine
+        .state
+        .card(card)
+        .and_then(|card| engine.registry.cards.get(card.def))
+        .map(|def| def.target);
+
+    match target_type {
+        Some(TargetType::None | TargetType::SelfTarget | TargetType::AnyAlly) => None,
+        Some(TargetType::AnyCreature) => explicit_monster.or_else(|| monster_ids.first().copied()),
+        Some(TargetType::Enemy) => explicit_monster.or_else(|| monster_ids.first().copied()),
+        Some(TargetType::AllEnemies | TargetType::RandomEnemy) => None,
+        None => explicit_monster,
+    }
+}
+
+fn summarize_step(label: &str, result: StepResult, loc: &Localization) -> Vec<String> {
+    match result {
+        StepResult::Done(log) => {
+            let mut messages = vec![format!(
+                "{label}: {} ({} {})",
+                loc.ui("status.done"),
+                log.len(),
+                loc.ui("unit.log_entries")
+            )];
+            messages.extend(summarize_log(log, loc));
+            messages
+        }
+        StepResult::NeedChoice(choice, log) => vec![format!(
+            "{label}: {} {:?} ({} {})",
+            loc.ui("status.choice_requested"),
+            choice.kind,
+            log.len(),
+            loc.ui("unit.log_entries")
+        )],
+        StepResult::CombatOver(result, log) => vec![format!(
+            "{label}: {} {:?} ({} {})",
+            loc.ui("status.combat_ended"),
+            result.outcome,
+            log.len(),
+            loc.ui("unit.log_entries")
+        )],
+        StepResult::Rejected(error, log) => vec![format!(
+            "{label}: {} ({} {}): {error}",
+            loc.ui("status.rejected"),
+            log.len(),
+            loc.ui("unit.log_entries")
+        )],
+        StepResult::Failed(error, log) => {
+            vec![format!(
+                "{label}: {} ({} {}): {error}",
+                loc.ui("status.failed"),
+                log.len(),
+                loc.ui("unit.log_entries")
+            )]
+        }
+    }
+}
+
+fn summarize_log(log: Vec<crate::core::log::LogEntry>, loc: &Localization) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in log {
+        match entry {
+            crate::core::log::LogEntry::StateChanged(change) => match change {
+                crate::core::log::StateChange::DamageApplied(result) if result.hp_loss > 0 => {
+                    out.push(format!(
+                        "{} {:?} -> {:?}: {} {}",
+                        loc.ui("log.damage"),
+                        result.dealer,
+                        result.target,
+                        result.hp_loss,
+                        loc.ui("label.hp")
+                    ));
+                }
+                crate::core::log::StateChange::BlockGained { target, amount } if amount > 0 => {
+                    out.push(format!("{} {:?}: +{}", loc.ui("log.block"), target, amount));
+                }
+                crate::core::log::StateChange::CardMoved { reason, .. } => {
+                    out.push(format!("{}: {reason:?}", loc.ui("log.card_moved")));
+                }
+                crate::core::log::StateChange::CardsShuffled { cards, .. } => {
+                    out.push(format!(
+                        "{} {} {}",
+                        loc.ui("log.shuffled"),
+                        cards.len(),
+                        loc.ui("log.cards")
+                    ));
+                }
+                crate::core::log::StateChange::CreatureDied { creature } => {
+                    out.push(format!("{}: {:?}", loc.ui("log.creature_died"), creature));
+                }
+                _ => {}
+            },
+            crate::core::log::LogEntry::CombatEnded(result) => {
+                out.push(format!(
+                    "{}: {:?}",
+                    loc.ui("log.combat_result"),
+                    result.outcome
+                ));
+            }
+            _ => {}
+        }
+        if out.len() >= 4 {
+            break;
+        }
+    }
+    out
+}
+
+trait CombatRenderer {
+    fn render(
+        &mut self,
+        snapshot: &CombatSnapshot,
+        messages: &VecDeque<String>,
+        loc: &Localization,
+    ) -> io::Result<()>;
+}
+
+struct AnsiRenderer;
+
+impl CombatRenderer for AnsiRenderer {
+    fn render(
+        &mut self,
+        snapshot: &CombatSnapshot,
+        messages: &VecDeque<String>,
+        loc: &Localization,
+    ) -> io::Result<()> {
+        print!("\x1b[2J\x1b[H");
+        render_snapshot(snapshot, messages, loc)
+    }
+}
+
+struct PlainRenderer;
+
+impl CombatRenderer for PlainRenderer {
+    fn render(
+        &mut self,
+        snapshot: &CombatSnapshot,
+        messages: &VecDeque<String>,
+        loc: &Localization,
+    ) -> io::Result<()> {
+        println!();
+        render_snapshot(snapshot, messages, loc)
+    }
+}
+
+fn render_snapshot(
+    snapshot: &CombatSnapshot,
+    messages: &VecDeque<String>,
+    loc: &Localization,
+) -> io::Result<()> {
+    println!(
+        "{} | {} {} | {} {} | lang {}",
+        loc.ui("app.title"),
+        loc.ui("label.seed"),
+        snapshot.seed,
+        loc.ui("label.phase"),
+        loc.phase(snapshot.phase),
+        loc.language().code()
+    );
+    println!(
+        "{}: {} {}/{}  {} {}  {} {}/{}  {} {}/{}",
+        loc.ui("label.player"),
+        loc.ui("label.hp"),
+        snapshot.player.hp,
+        snapshot.player.max_hp,
+        loc.ui("label.block"),
+        snapshot.player.block,
+        loc.ui("label.energy"),
+        snapshot.energy,
+        snapshot.max_energy,
+        loc.ui("label.hand"),
+        snapshot.hand.len(),
+        MAX_CARDS_IN_HAND
+    );
+    println!(
+        "{}: {} {}  {} {}  {} {}  {} {}",
+        loc.ui("label.piles"),
+        loc.ui("label.draw"),
+        snapshot.draw_count,
+        loc.ui("label.discard"),
+        snapshot.discard_count,
+        loc.ui("label.exhaust"),
+        snapshot.exhaust_count,
+        loc.ui("label.removed"),
+        snapshot.removed_count
+    );
+    println!();
+    println!("{}:", loc.ui("label.monsters"));
+    for (index, monster) in snapshot.monsters.iter().enumerate() {
+        let dead_suffix = if monster.alive {
+            String::new()
+        } else {
+            format!("  {}", loc.ui("label.dead"))
+        };
+        println!(
+            "  {}. {}  {} {}/{}  {} {}  {} {}{}",
+            index + 1,
+            monster.label,
+            loc.ui("label.hp"),
+            monster.hp,
+            monster.max_hp,
+            loc.ui("label.block"),
+            monster.block,
+            loc.ui("label.intent"),
+            monster.intent,
+            dead_suffix
+        );
+    }
+    if snapshot.monsters.is_empty() {
+        println!("  {}", loc.ui("label.none"));
+    }
+    println!();
+    println!("{}:", loc.ui("label.hand"));
+    for (index, card) in snapshot.hand.iter().enumerate() {
+        println!(
+            "  {}. {}  {:<8} {} {:<8} {} {}",
+            index + 1,
+            pad_display(&card.label, 28),
+            card.card_type,
+            loc.ui("label.cost"),
+            card.cost,
+            loc.ui("label.target"),
+            card.target
+        );
+    }
+    if snapshot.hand.is_empty() {
+        println!("  {}", loc.ui("label.empty"));
+    }
+    println!();
+    println!("{}:", loc.ui("label.messages"));
+    for message in messages {
+        println!("  {message}");
+    }
+    io::stdout().flush()
+}
+
+fn pad_display(value: &str, min_width: usize) -> String {
+    let width = display_width(value);
+    if width >= min_width {
+        value.to_string()
+    } else {
+        format!("{value}{}", " ".repeat(min_width - width))
+    }
+}
+
+fn display_width(value: &str) -> usize {
+    value.chars().map(char_display_width).sum()
+}
+
+fn char_display_width(ch: char) -> usize {
+    let code = ch as u32;
+    if matches!(
+        code,
+        0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+    ) {
+        2
+    } else {
+        1
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CombatSnapshot {
+    seed: u64,
+    phase: CombatPhase,
+    player: CreatureView,
+    energy: i32,
+    max_energy: i32,
+    draw_count: usize,
+    discard_count: usize,
+    exhaust_count: usize,
+    removed_count: usize,
+    monsters: Vec<CreatureView>,
+    hand: Vec<CardView>,
+}
+
+impl CombatSnapshot {
+    fn from_engine(engine: &Engine, loc: &Localization) -> Self {
+        let combat = engine.state.combat();
+        let phase = combat
+            .map(|combat| combat.phase)
+            .unwrap_or(CombatPhase::CombatStart);
+        let player_creature = combat
+            .and_then(|combat| engine.state.creature(combat.player.creature))
+            .map(|creature| CreatureView::from_creature(creature, loc))
+            .unwrap_or_else(|| CreatureView::placeholder(loc.ui("entity.player"), loc));
+
+        let monsters = combat
+            .map(|combat| {
+                combat
+                    .creatures
+                    .iter()
+                    .filter(|creature| creature.side == Side::Monsters)
+                    .map(|creature| CreatureView::from_monster(engine, creature.id, loc))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let hand = combat
+            .map(|combat| {
+                combat
+                    .player
+                    .piles
+                    .hand
+                    .iter()
+                    .copied()
+                    .map(|card| CardView::from_card(engine, card, loc))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Self {
+            seed: engine.state.run.seed,
+            phase,
+            player: player_creature,
+            energy: combat
+                .map(|combat| combat.player.energy)
+                .unwrap_or_default(),
+            max_energy: combat
+                .map(|combat| combat.player.max_energy)
+                .unwrap_or_default(),
+            draw_count: pile_count(combat, PileKind::Draw),
+            discard_count: pile_count(combat, PileKind::Discard),
+            exhaust_count: pile_count(combat, PileKind::Exhaust),
+            removed_count: pile_count(combat, PileKind::Removed),
+            monsters,
+            hand,
+        }
+    }
+}
+
+fn pile_count(combat: Option<&crate::core::state::CombatState>, pile: PileKind) -> usize {
+    combat
+        .map(|combat| combat.player.piles.pile(pile).len())
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Debug)]
+struct CreatureView {
+    label: String,
+    hp: i32,
+    max_hp: i32,
+    block: i32,
+    intent: String,
+    alive: bool,
+}
+
+impl CreatureView {
+    fn placeholder(label: &str, loc: &Localization) -> Self {
+        Self {
+            label: label.to_string(),
+            hp: 0,
+            max_hp: 0,
+            block: 0,
+            intent: loc.ui("label.unknown").to_string(),
+            alive: false,
+        }
+    }
+
+    fn from_creature(creature: &crate::core::state::Creature, loc: &Localization) -> Self {
+        Self {
+            label: loc.ui("entity.player").to_string(),
+            hp: creature.hp,
+            max_hp: creature.max_hp,
+            block: creature.block,
+            intent: loc.ui("label.none").to_string(),
+            alive: creature.alive,
+        }
+    }
+
+    fn from_monster(engine: &Engine, id: CreatureId, loc: &Localization) -> Self {
+        let Some(creature) = engine.state.creature(id) else {
+            return Self::placeholder(loc.ui("entity.monster"), loc);
+        };
+        let label = creature
+            .model
+            .and_then(|model| engine.registry.monsters.get(model))
+            .map(|def| loc.entity_name(def.loc_key))
+            .unwrap_or_else(|| format!("{:?}", creature.id));
+        Self {
+            label,
+            hp: creature.hp,
+            max_hp: creature.max_hp,
+            block: creature.block,
+            intent: monster_intent_label(engine, id, loc),
+            alive: creature.alive,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CardView {
+    label: String,
+    card_type: String,
+    cost: String,
+    target: String,
+}
+
+impl CardView {
+    fn from_card(engine: &Engine, id: CardInstanceId, loc: &Localization) -> Self {
+        let Some(card) = engine.state.card(id) else {
+            return Self {
+                label: format!("{:?}", id),
+                card_type: loc.ui("label.unknown").to_string(),
+                cost: "?".to_string(),
+                target: "?".to_string(),
+            };
+        };
+        let def = engine.registry.cards.get(card.def);
+        Self {
+            label: def
+                .map(|def| loc.entity_name(def.loc_key))
+                .unwrap_or_else(|| card.def.as_str().to_string()),
+            card_type: def
+                .map(|def| loc.card_type(def.card_type).to_string())
+                .unwrap_or_else(|| loc.ui("label.unknown").to_string()),
+            cost: cost_label(card.effective_costs(), loc),
+            target: def
+                .map(|def| loc.target_type(def.target).to_string())
+                .unwrap_or_else(|| loc.ui("label.unknown").to_string()),
+        }
+    }
+}
+
+fn card_label(engine: &Engine, id: CardInstanceId, loc: &Localization) -> String {
+    engine
+        .state
+        .card(id)
+        .and_then(|card| engine.registry.cards.get(card.def))
+        .map(|def| loc.entity_name(def.loc_key))
+        .unwrap_or_else(|| format!("{:?}", id))
+}
+
+fn cost_label(costs: CardCosts, loc: &Localization) -> String {
+    let mut parts = Vec::new();
+    if !matches!(costs.energy, CardCost::None) {
+        parts.push(format!(
+            "{}:{}",
+            loc.ui("cost.energy"),
+            single_cost_label(costs.energy, loc)
+        ));
+    }
+    if !matches!(costs.stars, CardCost::None) {
+        parts.push(format!(
+            "{}:{}",
+            loc.ui("cost.stars"),
+            single_cost_label(costs.stars, loc)
+        ));
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn single_cost_label(cost: CardCost, loc: &Localization) -> String {
+    loc.cost(cost)
+}
+
+fn monster_intent_label(engine: &Engine, monster: CreatureId, loc: &Localization) -> String {
+    let Some(creature) = engine.state.creature(monster) else {
+        return loc.ui("label.unknown").to_string();
+    };
+    let Some(model) = creature.model else {
+        return loc.ui("label.unknown").to_string();
+    };
+    let Some(def) = engine.registry.monsters.get(model) else {
+        return loc.ui("label.unknown").to_string();
+    };
+    let ctx = RuleCtx {
+        state: &engine.state,
+        registry: &engine.registry,
+        listener: None,
+    };
+    loc.intent((def.intent)(&ctx, monster))
+}

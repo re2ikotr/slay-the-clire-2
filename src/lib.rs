@@ -6,6 +6,7 @@
 //! usable by tests and future simulation APIs without UI dependencies.
 
 pub mod adapters;
+pub mod assets;
 pub mod content;
 pub mod core;
 pub mod registry;

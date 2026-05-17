@@ -19,7 +19,7 @@ use crate::core::query::{BlockCalc, DamageCalc, Decision, PreventReason, Resourc
 use crate::core::rules::{RuleCtx, RulePipeline};
 use crate::core::state::{
     decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileKind, ResourceKind, Side,
-    StateError,
+    StateError, BASE_HAND_DRAW_COUNT,
 };
 use crate::registry::StaticRegistry;
 
@@ -64,6 +64,11 @@ impl EffectResolver {
         std::mem::take(&mut self.log)
     }
 
+    fn clear_aborted_resolution(&mut self) {
+        self.queue.clear();
+        self.last_card_payment.clear();
+    }
+
     pub fn drain(&mut self, state: &mut GameState, registry: &StaticRegistry) -> StepResult {
         while let Some(effect) = self.queue.pop_front() {
             self.log.push(LogEntry::EffectStarted(effect.clone()));
@@ -76,13 +81,16 @@ impl EffectResolver {
                     return StepResult::NeedChoice(choice, self.take_log());
                 }
                 ApplyResult::CombatOver(result) => {
+                    self.clear_aborted_resolution();
                     self.log.push(LogEntry::CombatEnded(result.clone()));
                     return StepResult::CombatOver(result, self.take_log());
                 }
                 ApplyResult::Rejected(error) => {
+                    self.clear_aborted_resolution();
                     return StepResult::Rejected(error, self.take_log());
                 }
                 ApplyResult::StateError(error) => {
+                    self.clear_aborted_resolution();
                     self.log.push(LogEntry::Error(error.clone()));
                     return StepResult::Failed(error, self.take_log());
                 }
@@ -374,7 +382,10 @@ impl EffectResolver {
                 Err(error) => ApplyResult::StateError(error),
             },
             Effect::DrawCards { player, count } => {
-                self.apply_draw_cards(state, registry, player, count)
+                self.apply_draw_cards(state, registry, player, count, false)
+            }
+            Effect::DrawHandCards { player, count } => {
+                self.apply_draw_cards(state, registry, player, count, true)
             }
             Effect::DrawUntilNonAttack { player } => {
                 self.apply_draw_until_non_attack(state, registry, player)
@@ -774,12 +785,13 @@ impl EffectResolver {
         registry: &StaticRegistry,
         player: crate::core::ids::PlayerId,
         count: u8,
+        from_hand_draw: bool,
     ) -> ApplyResult {
         if count == 0 {
             return ApplyResult::Continue(Vec::new());
         }
 
-        let decision = RulePipeline::should_draw(registry, state, player, false);
+        let decision = RulePipeline::should_draw(registry, state, player, from_hand_draw);
         self.log.push(LogEntry::DecisionMade(decision.clone()));
         if !decision.is_allowed() {
             return ApplyResult::Continue(Vec::new());
@@ -832,6 +844,7 @@ impl EffectResolver {
                 vec![Effect::Trigger(Event::CardDrawn(CardDrawn {
                     player,
                     card,
+                    from_hand_draw,
                 }))],
             ) {
                 ApplyResult::Continue(_) => {}
@@ -921,7 +934,7 @@ impl EffectResolver {
                 .combat()
                 .map(|combat| combat.player.piles.hand.len())
                 .unwrap_or_default();
-            match self.apply_draw_cards(state, registry, player, 1) {
+            match self.apply_draw_cards(state, registry, player, 1, false) {
                 ApplyResult::Continue(_) => {}
                 other => return other,
             }
@@ -1339,7 +1352,10 @@ fn start_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
                         amount: -diff,
                     });
                 }
-                effects.push(Effect::DrawCards { player, count: 5 });
+                effects.push(Effect::DrawHandCards {
+                    player,
+                    count: BASE_HAND_DRAW_COUNT,
+                });
             }
             effects.push(Effect::EnterPhase(CombatPhase::PlayerAction));
         }
@@ -1413,7 +1429,7 @@ mod tests {
         DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
     };
     use crate::core::rules::{prevent_by_current_listener, RuleCtx};
-    use crate::core::state::{CardCost, CardCosts, GameState};
+    use crate::core::state::{CardCost, CardCosts, CombatSetupCard, CombatSetupMonster, GameState};
     use crate::core::Command;
     use crate::registry::StaticRegistry;
 
@@ -1643,6 +1659,36 @@ mod tests {
         assert!(matches!(result, StepResult::Done(_)));
         let enemy = engine.state.creature(target).unwrap();
         assert_eq!(enemy.hp, 24);
+    }
+
+    #[test]
+    fn draw_cards_stops_at_sts2_hand_limit() {
+        let setup = CombatSetupCard {
+            def: STARTER_STRIKE,
+            upgraded: false,
+            costs: CardCosts::energy(1),
+        };
+        let mut state = GameState::single_player_test_combat(
+            16,
+            [setup; 12],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 10,
+            }],
+            50,
+            3,
+            10,
+        );
+        let player = state.player_id().unwrap();
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::DrawCards { player, count: 2 });
+
+        let result = resolver.drain(&mut state, &StaticRegistry::empty());
+
+        assert!(matches!(result, StepResult::Done(_)));
+        let combat = state.combat().unwrap();
+        assert_eq!(combat.player.piles.hand.len(), 10);
+        assert_eq!(combat.player.piles.draw.len(), 2);
     }
 
     #[test]

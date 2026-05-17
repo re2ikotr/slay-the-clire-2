@@ -33,6 +33,7 @@ pub struct CardsShuffled {
 pub struct CardDrawn {
     pub player: PlayerId,
     pub card: CardInstanceId,
+    pub from_hand_draw: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

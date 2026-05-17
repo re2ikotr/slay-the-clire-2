@@ -213,6 +213,7 @@ mod tests {
     use crate::core::ids::CardId;
     use crate::core::ids::{CardInstanceId, CreatureId};
     use crate::core::log::{LogEntry, StateChange};
+    use crate::core::query::PreventReason;
     use crate::core::state::{PileId, PileKind, ResourceKind};
 
     use super::*;
@@ -275,6 +276,55 @@ mod tests {
         assert_eq!(player_creature.hp, 43);
         assert_eq!(player_creature.block, 0);
         assert_eq!(engine.state.creature(enemy).unwrap().turns_taken, 1);
+    }
+
+    #[test]
+    fn rejected_card_play_does_not_leave_stale_effects() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(2));
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.combat().unwrap().monster_ids()[0];
+        let combat = engine.state.combat_mut().unwrap();
+        combat.player.energy = 0;
+        let strike = combat
+            .player
+            .piles
+            .hand
+            .iter()
+            .copied()
+            .find(|card| combat.cards.get(card).unwrap().def == STRIKE_IRONCLAD)
+            .unwrap();
+
+        let rejected = engine.step(Command::PlayCard {
+            player,
+            card: strike,
+            target: Some(enemy),
+        });
+
+        assert!(matches!(
+            rejected,
+            StepResult::Rejected(
+                CommandError::Prevented(PreventReason::InsufficientResource(ResourceKind::Energy)),
+                _
+            )
+        ));
+        {
+            let combat = engine.state.combat().unwrap();
+            assert_eq!(combat.player.energy, 0);
+            assert!(combat.player.piles.hand.contains(&strike));
+        }
+
+        engine.state.combat_mut().unwrap().player.energy = 1;
+        let played = engine.step(Command::PlayCard {
+            player,
+            card: strike,
+            target: Some(enemy),
+        });
+
+        assert!(matches!(played, StepResult::Done(_)));
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.player.energy, 0);
+        assert!(combat.player.piles.discard.contains(&strike));
+        assert_eq!(engine.state.creature(enemy).unwrap().hp, 36);
     }
 
     #[test]
