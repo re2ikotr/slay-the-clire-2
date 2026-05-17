@@ -2,7 +2,10 @@ use std::collections::VecDeque;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as TerminalEvent, KeyCode, KeyEvent,
+    KeyEventKind, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -20,16 +23,111 @@ use super::profile::TerminalProfile;
 use super::symbols::{Symbols, UiSymbol};
 use super::theme::{Theme, UiRole};
 use super::{
-    format_power_list, CombatDriver, CombatSnapshot, CombatUiAction, CreatureView,
-    MAX_CARDS_IN_HAND, MAX_MESSAGES,
+    display_width, format_power_list, CombatDriver, CombatSnapshot, CombatUiAction, CreatureView,
+    MAX_CARDS_IN_HAND,
 };
 
 const TICK_RATE: Duration = Duration::from_millis(120);
+const MESSAGE_HISTORY_LIMIT: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     Hand,
     Monsters,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusPanel {
+    Player,
+    Monsters,
+    Messages,
+    Hand,
+    DrawPile,
+    DiscardPile,
+    ExhaustPile,
+}
+
+impl FocusPanel {
+    fn from_key(key: char) -> Option<Self> {
+        match key.to_ascii_lowercase() {
+            'p' => Some(Self::Player),
+            'm' => Some(Self::Monsters),
+            'g' => Some(Self::Messages),
+            'c' => Some(Self::Hand),
+            'd' => Some(Self::DrawPile),
+            's' => Some(Self::DiscardPile),
+            'x' => Some(Self::ExhaustPile),
+            _ => None,
+        }
+    }
+
+    fn key(self) -> char {
+        match self {
+            Self::Player => 'p',
+            Self::Monsters => 'm',
+            Self::Messages => 'g',
+            Self::Hand => 'c',
+            Self::DrawPile => 'd',
+            Self::DiscardPile => 's',
+            Self::ExhaustPile => 'x',
+        }
+    }
+
+    fn title(self, loc: Localization) -> &'static str {
+        match self {
+            Self::Player => loc.ui("label.player"),
+            Self::Monsters => loc.ui("label.monsters"),
+            Self::Messages => loc.ui("label.messages"),
+            Self::Hand => loc.ui("label.hand"),
+            Self::DrawPile => loc.ui("label.draw"),
+            Self::DiscardPile => loc.ui("label.discard"),
+            Self::ExhaustPile => loc.ui("label.exhaust"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnemyTargetPreview {
+    None,
+    Single(usize),
+    All,
+}
+
+impl EnemyTargetPreview {
+    fn for_card(snapshot: &CombatSnapshot, hand_index: usize, selected_monster: usize) -> Self {
+        let Some(card) = snapshot.hand.get(hand_index) else {
+            return Self::None;
+        };
+        let has_alive_enemy = snapshot.monsters.iter().any(|monster| monster.alive);
+        if !has_alive_enemy {
+            return Self::None;
+        }
+
+        match card.target {
+            TargetType::Enemy | TargetType::AnyCreature => {
+                selected_display_monster_index(snapshot, selected_monster)
+                    .map(Self::Single)
+                    .unwrap_or(Self::None)
+            }
+            TargetType::AllEnemies => Self::All,
+            TargetType::None
+            | TargetType::RandomEnemy
+            | TargetType::SelfTarget
+            | TargetType::AnyAlly => Self::None,
+        }
+    }
+
+    fn highlights(self, index: usize, monster: &CreatureView) -> bool {
+        match self {
+            Self::None => false,
+            Self::Single(target_index) => index == target_index && monster.alive,
+            Self::All => monster.alive,
+        }
+    }
+
+    fn focused_marker(self, index: usize) -> bool {
+        matches!(self, Self::Single(target_index) if index == target_index)
+    }
 }
 
 pub(super) struct RatatuiCombatApp<D> {
@@ -44,6 +142,8 @@ pub(super) struct RatatuiCombatApp<D> {
     symbols: Symbols,
     clock: AnimationClock,
     show_help: bool,
+    focused_panel: Option<FocusPanel>,
+    focus_scroll: u16,
 }
 
 impl<D: CombatDriver> RatatuiCombatApp<D> {
@@ -62,6 +162,8 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
             symbols: Symbols::new(profile),
             clock: AnimationClock::default(),
             show_help: false,
+            focused_panel: None,
+            focus_scroll: 0,
         };
         let snapshot = app.driver.snapshot(&app.loc);
         app.sync_focus_to_selected_card(&snapshot);
@@ -71,7 +173,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
     pub fn run(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -96,10 +198,14 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_default();
             if event::poll(timeout)? {
-                if let TerminalEvent::Key(key) = event::read()? {
-                    if self.handle_key(key) {
-                        break;
+                match event::read()? {
+                    TerminalEvent::Key(key) => {
+                        if self.handle_key(key) {
+                            break;
+                        }
                     }
+                    TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
+                    _ => {}
                 }
             }
 
@@ -116,25 +222,86 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
             return false;
         }
 
+        if self.focused_panel.is_some() {
+            return self.handle_focused_key(key);
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return true,
             KeyCode::Char('?') | KeyCode::Char('h') => self.show_help = !self.show_help,
             KeyCode::Char('e') => self.submit(CombatUiAction::EndTurn),
             KeyCode::Char('r') => self.submit(CombatUiAction::Restart),
             KeyCode::Char('l') => self.toggle_language(),
+            KeyCode::Char(value) => {
+                if let Some(panel) = FocusPanel::from_key(value) {
+                    self.toggle_focused_panel(panel);
+                } else if value.is_ascii_digit() && value != '0' {
+                    let index = value as usize - '1' as usize;
+                    self.select_card(index);
+                }
+            }
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Left => self.select_previous_card(),
             KeyCode::Right => self.select_next_card(),
             KeyCode::Up => self.select_previous_monster(),
             KeyCode::Down => self.select_next_monster(),
             KeyCode::Enter => self.play_selected_card(),
-            KeyCode::Char(value) if value.is_ascii_digit() && value != '0' => {
-                let index = value as usize - '1' as usize;
-                self.select_card(index);
-            }
             _ => {}
         }
         false
+    }
+
+    fn handle_focused_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('q') => return true,
+            KeyCode::Esc => self.close_focused_panel(),
+            KeyCode::Char(value) => {
+                if let Some(panel) = FocusPanel::from_key(value) {
+                    self.toggle_focused_panel(panel);
+                }
+            }
+            KeyCode::Up => self.scroll_focused_panel_up(1),
+            KeyCode::Down => self.scroll_focused_panel_down(1),
+            KeyCode::PageUp => self.scroll_focused_panel_up(8),
+            KeyCode::PageDown => self.scroll_focused_panel_down(8),
+            KeyCode::Home => self.focus_scroll = 0,
+            KeyCode::End => self.focus_scroll = u16::MAX,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.focused_panel.is_none() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_focused_panel_up(3),
+            MouseEventKind::ScrollDown => self.scroll_focused_panel_down(3),
+            _ => {}
+        }
+    }
+
+    fn toggle_focused_panel(&mut self, panel: FocusPanel) {
+        if self.focused_panel == Some(panel) {
+            self.close_focused_panel();
+        } else {
+            self.focused_panel = Some(panel);
+            self.focus_scroll = 0;
+        }
+    }
+
+    fn close_focused_panel(&mut self) {
+        self.focused_panel = None;
+        self.focus_scroll = 0;
+    }
+
+    fn scroll_focused_panel_up(&mut self, amount: u16) {
+        self.focus_scroll = self.focus_scroll.saturating_sub(amount);
+    }
+
+    fn scroll_focused_panel_down(&mut self, amount: u16) {
+        self.focus_scroll = self.focus_scroll.saturating_add(amount);
     }
 
     fn toggle_focus(&mut self) {
@@ -213,15 +380,14 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
     }
 
     fn sync_focus_to_selected_card(&mut self, snapshot: &CombatSnapshot) {
-        if selected_card_targets_monster(snapshot, self.selected_card) {
-            self.focus = Focus::Monsters;
-            if let Some(monster_index) =
-                selected_display_monster_index(snapshot, self.selected_monster)
-            {
+        match EnemyTargetPreview::for_card(snapshot, self.selected_card, self.selected_monster) {
+            EnemyTargetPreview::Single(monster_index) => {
+                self.focus = Focus::Monsters;
                 self.selected_monster = monster_index;
             }
-        } else {
-            self.focus = Focus::Hand;
+            EnemyTargetPreview::None | EnemyTargetPreview::All => {
+                self.focus = Focus::Hand;
+            }
         }
     }
 
@@ -259,7 +425,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
     }
 
     fn push_message(&mut self, message: String) {
-        if self.messages.len() == MAX_MESSAGES {
+        if self.messages.len() == MESSAGE_HISTORY_LIMIT {
             self.messages.pop_front();
         }
         self.messages.push_back(message);
@@ -268,14 +434,20 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
     fn render(&mut self, frame: &mut Frame<'_>) {
         let snapshot = self.driver.snapshot(&self.loc);
         self.clamp_to_snapshot(&snapshot);
+        if let Some(panel) = self.focused_panel {
+            self.render_focused_panel(frame, &snapshot, panel);
+            return;
+        }
 
         let root = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(10),
+            Constraint::Length(13),
             Constraint::Length(3),
         ])
         .split(frame.size());
+        let hand_area =
+            Layout::vertical([Constraint::Length(10), Constraint::Length(3)]).split(root[2]);
 
         let body = Layout::horizontal([
             Constraint::Percentage(32),
@@ -288,8 +460,205 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
         self.render_player(frame, body[0], &snapshot);
         self.render_monsters(frame, body[1], &snapshot);
         self.render_messages(frame, body[2]);
-        self.render_hand(frame, root[2], &snapshot);
+        self.render_hand(frame, hand_area[0], &snapshot);
+        self.render_piles(frame, hand_area[1], &snapshot);
         self.render_footer(frame, root[3]);
+    }
+
+    fn render_focused_panel(
+        &mut self,
+        frame: &mut Frame<'_>,
+        snapshot: &CombatSnapshot,
+        panel: FocusPanel,
+    ) {
+        let lines = self.focus_panel_lines(snapshot, panel);
+        let title = format!(
+            "{}  [{}] {}",
+            panel.title(self.loc),
+            panel.key(),
+            self.loc.ui("label.close")
+        );
+        let block = self.panel(&title);
+        let inner = block.inner(frame.size());
+        let max_scroll = scroll_limit(lines.len(), inner.height);
+        self.focus_scroll = self.focus_scroll.min(max_scroll);
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block)
+                .scroll((self.focus_scroll, 0)),
+            frame.size(),
+        );
+    }
+
+    fn focus_panel_lines(
+        &self,
+        snapshot: &CombatSnapshot,
+        panel: FocusPanel,
+    ) -> Vec<Line<'static>> {
+        match panel {
+            FocusPanel::Player => self.player_focus_lines(snapshot),
+            FocusPanel::Monsters => self.monster_focus_lines(snapshot),
+            FocusPanel::Messages => self.message_lines(),
+            FocusPanel::Hand => self.hand_lines(snapshot),
+            FocusPanel::DrawPile => self.pile_card_lines(&snapshot.draw_pile),
+            FocusPanel::DiscardPile => self.pile_card_lines(&snapshot.discard_pile),
+            FocusPanel::ExhaustPile => self.pile_card_lines(&snapshot.exhaust_pile),
+        }
+    }
+
+    fn player_focus_lines(&self, snapshot: &CombatSnapshot) -> Vec<Line<'static>> {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", self.symbols.get(UiSymbol::Heart)),
+                    self.theme
+                        .style(hp_role(snapshot.player.hp, snapshot.player.max_hp)),
+                ),
+                Span::styled(
+                    format!("{}/{}", snapshot.player.hp, snapshot.player.max_hp),
+                    self.theme.style(UiRole::Base),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!(
+                        "{} {}",
+                        self.symbols.get(UiSymbol::Block),
+                        snapshot.player.block
+                    ),
+                    self.theme.style(UiRole::Base),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", self.symbols.get(UiSymbol::Energy)),
+                    self.theme.style(UiRole::Energy),
+                ),
+                Span::styled(
+                    format!("{}/{}", snapshot.energy, snapshot.max_energy),
+                    self.theme.style(UiRole::Energy),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} {}", self.symbols.get(UiSymbol::Star), snapshot.stars),
+                    self.theme.style(UiRole::Prompt),
+                ),
+            ]),
+            status_line(
+                self.loc.ui("label.status"),
+                self.loc.ui("label.none"),
+                &snapshot.player.powers,
+                self.theme,
+                false,
+            ),
+        ]
+    }
+
+    fn monster_focus_lines(&self, snapshot: &CombatSnapshot) -> Vec<Line<'static>> {
+        if snapshot.monsters.is_empty() {
+            return vec![Line::styled(
+                self.loc.ui("label.none"),
+                self.theme.style(UiRole::Muted),
+            )];
+        }
+
+        let target_preview =
+            EnemyTargetPreview::for_card(snapshot, self.selected_card, self.selected_monster);
+        let mut lines = Vec::new();
+        for (index, monster) in snapshot.monsters.iter().enumerate() {
+            let highlighted = target_preview.highlights(index, monster);
+            let label_style = if highlighted {
+                self.theme.style(UiRole::CardSelected)
+            } else if monster.alive {
+                self.theme.style(UiRole::Monster)
+            } else {
+                self.theme.style(UiRole::CardDisabled)
+            };
+            let dead_suffix = if monster.alive {
+                String::new()
+            } else {
+                format!(
+                    "  {} {}",
+                    self.symbols.get(UiSymbol::Dead),
+                    self.loc.ui("label.dead")
+                )
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "{}. {}  {}{}",
+                    index + 1,
+                    monster.label,
+                    monster_hp_label(monster, self.symbols),
+                    dead_suffix
+                ),
+                label_style,
+            )]));
+            lines.push(monster_intent_line(
+                monster,
+                self.theme,
+                self.symbols,
+                self.loc,
+                highlighted,
+            ));
+            lines.push(status_line(
+                self.loc.ui("label.status"),
+                self.loc.ui("label.none"),
+                &monster.powers,
+                self.theme,
+                highlighted,
+            ));
+            lines.push(Line::raw(""));
+        }
+        lines
+    }
+
+    fn message_lines(&self) -> Vec<Line<'static>> {
+        if self.messages.is_empty() {
+            return vec![Line::styled(
+                self.loc.ui("label.empty"),
+                self.theme.style(UiRole::Muted),
+            )];
+        }
+
+        self.messages
+            .iter()
+            .map(|message| {
+                let style = if message.contains(self.loc.ui("status.rejected"))
+                    || message.contains(self.loc.ui("status.failed"))
+                {
+                    self.theme.style(UiRole::LogWarning)
+                } else {
+                    self.theme.style(UiRole::Log)
+                };
+                Line::styled(message.clone(), style)
+            })
+            .collect()
+    }
+
+    fn hand_lines(&self, snapshot: &CombatSnapshot) -> Vec<Line<'static>> {
+        card_list_lines(
+            &snapshot.hand,
+            Some(self.selected_card),
+            self.focus == Focus::Monsters,
+            self.symbols,
+            self.loc,
+            self.theme,
+            self.profile.animation,
+            self.clock.tick(),
+        )
+    }
+
+    fn pile_card_lines(&self, cards: &[super::CardView]) -> Vec<Line<'static>> {
+        card_list_lines(
+            cards,
+            None,
+            false,
+            self.symbols,
+            self.loc,
+            self.theme,
+            self.profile.animation,
+            self.clock.tick(),
+        )
     }
 
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect, snapshot: &CombatSnapshot) {
@@ -344,7 +713,6 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
-            Constraint::Min(1),
         ])
         .split(inner);
         let hp_style = hp_role(snapshot.player.hp, snapshot.player.max_hp);
@@ -391,17 +759,6 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
                 ),
             ]);
         }
-        resource_spans.extend([
-            Span::raw("  "),
-            Span::styled(
-                format!("{} {}", self.loc.ui("label.hand"), snapshot.hand.len()),
-                self.theme.style(UiRole::Base),
-            ),
-            Span::styled(
-                format!("/{}", MAX_CARDS_IN_HAND),
-                self.theme.style(UiRole::Muted),
-            ),
-        ]);
         frame.render_widget(Paragraph::new(Line::from(resource_spans)), chunks[1]);
         frame.render_widget(
             Paragraph::new(status_line(
@@ -413,39 +770,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
             )),
             chunks[2],
         );
-        frame.render_widget(
-            Paragraph::new(Text::from(vec![
-                pile_line(
-                    self.symbols,
-                    self.theme,
-                    self.loc.ui("label.draw"),
-                    UiSymbol::Draw,
-                    snapshot.draw_count,
-                ),
-                pile_line(
-                    self.symbols,
-                    self.theme,
-                    self.loc.ui("label.discard"),
-                    UiSymbol::Discard,
-                    snapshot.discard_count,
-                ),
-                pile_line(
-                    self.symbols,
-                    self.theme,
-                    self.loc.ui("label.exhaust"),
-                    UiSymbol::Exhaust,
-                    snapshot.exhaust_count,
-                ),
-                pile_line(
-                    self.symbols,
-                    self.theme,
-                    self.loc.ui("label.removed"),
-                    UiSymbol::Removed,
-                    snapshot.removed_count,
-                ),
-            ])),
-            chunks[3],
-        );
+        self.render_panel_hint(frame, area, FocusPanel::Player);
     }
 
     fn render_monsters(&self, frame: &mut Frame<'_>, area: Rect, snapshot: &CombatSnapshot) {
@@ -470,12 +795,16 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
             .map(|_| Constraint::Length(3))
             .collect::<Vec<_>>();
         let rows = Layout::vertical(row_constraints).split(inner);
+        let target_preview =
+            EnemyTargetPreview::for_card(snapshot, self.selected_card, self.selected_monster);
         for (index, monster) in snapshot.monsters.iter().enumerate() {
-            let selected = index == self.selected_monster;
+            let highlighted = target_preview.highlights(index, monster);
+            let focused = target_preview.focused_marker(index) && self.focus == Focus::Monsters;
             if let Some(area) = rows.get(index) {
-                self.render_monster(frame, *area, index, monster, selected);
+                self.render_monster(frame, *area, index, monster, highlighted, focused);
             }
         }
+        self.render_panel_hint(frame, area, FocusPanel::Monsters);
     }
 
     fn render_monster(
@@ -484,7 +813,8 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
         area: Rect,
         index: usize,
         monster: &CreatureView,
-        selected: bool,
+        highlighted: bool,
+        focused: bool,
     ) {
         if area.height == 0 {
             return;
@@ -508,17 +838,17 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
             self.theme.style(UiRole::CardDisabled)
         };
         let selected_style = self.theme.style(UiRole::CardSelected);
-        let row_style = if selected {
+        let row_style = if highlighted {
             selected_style
         } else {
             label_style
         };
-        let index_style = if selected {
+        let index_style = if highlighted {
             selected_style
         } else {
             self.theme.style(UiRole::Muted)
         };
-        let marker_style = if selected && self.focus == Focus::Monsters {
+        let marker_style = if focused {
             VisualEffect::Pulse {
                 first: UiRole::Prompt,
                 second: UiRole::Energy,
@@ -528,7 +858,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
         } else {
             self.theme.style(UiRole::Muted)
         };
-        let marker = if selected {
+        let marker = if focused {
             self.symbols.get(UiSymbol::Prompt)
         } else {
             " "
@@ -545,7 +875,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
                     self.symbols.get(UiSymbol::Dead),
                     self.loc.ui("label.dead")
                 ),
-                if selected {
+                if highlighted {
                     selected_style
                 } else {
                     self.theme.style(UiRole::Defeat)
@@ -569,7 +899,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
                 self.theme,
                 self.symbols,
                 self.loc,
-                selected,
+                highlighted,
             )),
             rows[1],
         );
@@ -579,86 +909,101 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
                 self.loc.ui("label.none"),
                 &monster.powers,
                 self.theme,
-                selected,
+                highlighted,
             )),
             rows[2],
         );
     }
 
     fn render_messages(&self, frame: &mut Frame<'_>, area: Rect) {
-        let items = self
-            .messages
-            .iter()
-            .map(|message| {
-                let style = if message.contains(self.loc.ui("status.rejected"))
-                    || message.contains(self.loc.ui("status.failed"))
-                {
-                    self.theme.style(UiRole::LogWarning)
-                } else {
-                    self.theme.style(UiRole::Log)
-                };
-                ListItem::new(Line::styled(message.as_str(), style))
-            })
-            .collect::<Vec<_>>();
+        let lines = latest_visible_lines(self.message_lines(), area.height.saturating_sub(2));
+        let items = lines.into_iter().map(ListItem::new).collect::<Vec<_>>();
 
         frame.render_widget(
             List::new(items).block(self.panel(self.loc.ui("label.messages"))),
             area,
         );
+        self.render_panel_hint(frame, area, FocusPanel::Messages);
     }
 
     fn render_hand(&self, frame: &mut Frame<'_>, area: Rect, snapshot: &CombatSnapshot) {
-        let mut lines = Vec::new();
-        if snapshot.hand.is_empty() {
-            lines.push(Line::styled(
-                self.loc.ui("label.empty"),
-                self.theme.style(UiRole::Muted),
-            ));
-        }
-
-        for (index, card) in snapshot.hand.iter().enumerate() {
-            let selected = index == self.selected_card;
-            let marker = if selected {
-                self.symbols.get(UiSymbol::Prompt)
-            } else {
-                " "
-            };
-            let marker_style = if selected && self.focus == Focus::Monsters {
-                VisualEffect::Pulse {
-                    first: UiRole::Prompt,
-                    second: UiRole::Energy,
-                    period_ticks: 8,
-                }
-                .style(self.theme, self.profile.animation, self.clock.tick())
-            } else {
-                self.theme.style(UiRole::Muted)
-            };
-            let line_style = if selected {
-                self.theme.style(UiRole::CardSelected)
-            } else {
-                self.theme.style(UiRole::CardPlayable)
-            };
-            let mut spans = vec![
-                Span::styled(format!("{marker} "), marker_style),
-                Span::styled(format!("{:>2}. ", index + 1), line_style),
-            ];
-            spans.extend(card_cost_spans(
-                card.costs,
-                self.symbols,
-                self.loc,
-                self.theme,
-            ));
-            spans.extend([
-                Span::styled(card.label.as_str(), line_style),
-                Span::raw("  "),
-                Span::styled(card.card_type.as_str(), line_style),
-            ]);
-            lines.push(Line::from(spans));
-        }
-
         frame.render_widget(
-            Paragraph::new(Text::from(lines)).block(self.panel(self.loc.ui("label.hand"))),
+            Paragraph::new(Text::from(self.hand_lines(snapshot)))
+                .block(self.panel(&hand_title(self.loc, snapshot))),
             area,
+        );
+        self.render_panel_hint(frame, area, FocusPanel::Hand);
+    }
+
+    fn render_piles(&self, frame: &mut Frame<'_>, area: Rect, snapshot: &CombatSnapshot) {
+        let piles = Layout::horizontal([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(area);
+
+        self.render_pile_box(
+            frame,
+            piles[0],
+            self.loc.ui("label.draw"),
+            UiSymbol::Draw,
+            snapshot.draw_pile.len(),
+            FocusPanel::DrawPile,
+        );
+        self.render_pile_box(
+            frame,
+            piles[1],
+            self.loc.ui("label.discard"),
+            UiSymbol::Discard,
+            snapshot.discard_pile.len(),
+            FocusPanel::DiscardPile,
+        );
+        self.render_pile_box(
+            frame,
+            piles[2],
+            self.loc.ui("label.exhaust"),
+            UiSymbol::Exhaust,
+            snapshot.exhaust_pile.len(),
+            FocusPanel::ExhaustPile,
+        );
+    }
+
+    fn render_pile_box(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        title: &str,
+        symbol: UiSymbol,
+        count: usize,
+        panel: FocusPanel,
+    ) {
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{} ", self.symbols.get(symbol)),
+                self.theme.style(UiRole::Muted),
+            ),
+            Span::styled(count.to_string(), self.theme.style(UiRole::Base)),
+        ]);
+        frame.render_widget(Paragraph::new(line).block(self.panel(title)), area);
+        self.render_panel_hint(frame, area, panel);
+    }
+
+    fn render_panel_hint(&self, frame: &mut Frame<'_>, area: Rect, panel: FocusPanel) {
+        if area.width < 10 || area.height < 3 {
+            return;
+        }
+        let hint = format!("[{}] {}", panel.key(), self.loc.ui("label.view"));
+        let width = display_width(&hint).min(area.width.saturating_sub(2) as usize) as u16;
+        let rect = Rect::new(
+            area.x + area.width.saturating_sub(width + 1),
+            area.y + area.height.saturating_sub(2),
+            width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(hint, self.theme.style(UiRole::Panel))),
+            rect,
         );
     }
 
@@ -698,7 +1043,11 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()
 }
 
@@ -738,33 +1087,85 @@ fn selected_display_monster_index(
     }
 }
 
-fn selected_card_targets_monster(snapshot: &CombatSnapshot, hand_index: usize) -> bool {
-    snapshot
-        .hand
-        .get(hand_index)
-        .map(|card| card_targets_monster(card.target))
-        .unwrap_or(false)
-        && snapshot.monsters.iter().any(|monster| monster.alive)
+fn hand_title(loc: Localization, snapshot: &CombatSnapshot) -> String {
+    format!(
+        "{} {}/{}",
+        loc.ui("label.hand"),
+        snapshot.hand.len(),
+        MAX_CARDS_IN_HAND
+    )
 }
 
-fn card_targets_monster(target: TargetType) -> bool {
-    matches!(target, TargetType::Enemy)
+fn scroll_limit(line_count: usize, visible_height: u16) -> u16 {
+    line_count
+        .saturating_sub(visible_height as usize)
+        .min(u16::MAX as usize) as u16
 }
 
-fn pile_line(
+fn latest_visible_lines(lines: Vec<Line<'static>>, visible_height: u16) -> Vec<Line<'static>> {
+    let visible_height = visible_height as usize;
+    if visible_height == 0 || lines.len() <= visible_height {
+        return lines;
+    }
+    let skip = lines.len() - visible_height;
+    lines.into_iter().skip(skip).collect()
+}
+
+fn card_list_lines(
+    cards: &[super::CardView],
+    selected_card: Option<usize>,
+    pulse_selected_marker: bool,
     symbols: Symbols,
+    loc: Localization,
     theme: Theme,
-    label: &str,
-    symbol: UiSymbol,
-    count: usize,
-) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{} ", symbols.get(symbol)),
+    animation_enabled: bool,
+    tick: u64,
+) -> Vec<Line<'static>> {
+    if cards.is_empty() {
+        return vec![Line::styled(
+            loc.ui("label.empty"),
             theme.style(UiRole::Muted),
-        ),
-        Span::styled(format!("{label}: {count}"), theme.style(UiRole::Base)),
-    ])
+        )];
+    }
+
+    cards
+        .iter()
+        .enumerate()
+        .map(|(index, card)| {
+            let selected = selected_card == Some(index);
+            let marker = if selected {
+                symbols.get(UiSymbol::Prompt)
+            } else {
+                " "
+            };
+            let marker_style = if selected && pulse_selected_marker {
+                VisualEffect::Pulse {
+                    first: UiRole::Prompt,
+                    second: UiRole::Energy,
+                    period_ticks: 8,
+                }
+                .style(theme, animation_enabled, tick)
+            } else {
+                theme.style(UiRole::Muted)
+            };
+            let line_style = if selected {
+                theme.style(UiRole::CardSelected)
+            } else {
+                theme.style(UiRole::CardPlayable)
+            };
+            let mut spans = vec![
+                Span::styled(format!("{marker} "), marker_style),
+                Span::styled(format!("{:>2}. ", index + 1), line_style),
+            ];
+            spans.extend(card_cost_spans(card.costs, symbols, loc, theme));
+            spans.extend([
+                Span::styled(card.label.clone(), line_style),
+                Span::raw("  "),
+                Span::styled(card.card_type.clone(), line_style),
+            ]);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn monster_label_width(area_width: u16) -> u16 {
@@ -840,13 +1241,13 @@ fn append_resource_cost(
     spans.push(Span::styled(loc.cost(cost), style));
 }
 
-fn monster_intent_line<'a>(
-    monster: &'a CreatureView,
+fn monster_intent_line(
+    monster: &CreatureView,
     theme: Theme,
     symbols: Symbols,
     loc: Localization,
     selected: bool,
-) -> Line<'a> {
+) -> Line<'static> {
     let value_style = if selected {
         theme.style(UiRole::CardSelected)
     } else {
@@ -903,5 +1304,94 @@ fn ratio(value: i32, max: i32) -> f64 {
         0.0
     } else {
         (value.max(0) as f64 / max as f64).clamp(0.0, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::CardView;
+    use super::*;
+    use crate::core::state::CombatPhase;
+
+    #[test]
+    fn all_enemy_target_preview_highlights_all_alive_enemies() {
+        let snapshot = snapshot_with_card_target(TargetType::AllEnemies);
+        let preview = EnemyTargetPreview::for_card(&snapshot, 0, 1);
+
+        assert_eq!(preview, EnemyTargetPreview::All);
+        assert!(preview.highlights(0, &snapshot.monsters[0]));
+        assert!(!preview.highlights(1, &snapshot.monsters[1]));
+        assert!(preview.highlights(2, &snapshot.monsters[2]));
+        assert!(!preview.focused_marker(0));
+        assert!(!preview.focused_marker(2));
+    }
+
+    #[test]
+    fn self_and_none_target_preview_do_not_highlight_enemies() {
+        for target in [TargetType::SelfTarget, TargetType::None] {
+            let snapshot = snapshot_with_card_target(target);
+            let preview = EnemyTargetPreview::for_card(&snapshot, 0, 0);
+
+            assert_eq!(preview, EnemyTargetPreview::None);
+            assert!(snapshot
+                .monsters
+                .iter()
+                .enumerate()
+                .all(|(index, monster)| !preview.highlights(index, monster)));
+        }
+    }
+
+    #[test]
+    fn single_enemy_target_preview_uses_one_alive_enemy() {
+        let snapshot = snapshot_with_card_target(TargetType::Enemy);
+        let preview = EnemyTargetPreview::for_card(&snapshot, 0, 1);
+
+        assert_eq!(preview, EnemyTargetPreview::Single(0));
+        assert!(preview.highlights(0, &snapshot.monsters[0]));
+        assert!(!preview.highlights(1, &snapshot.monsters[1]));
+        assert!(!preview.highlights(2, &snapshot.monsters[2]));
+        assert!(preview.focused_marker(0));
+    }
+
+    fn snapshot_with_card_target(target: TargetType) -> CombatSnapshot {
+        CombatSnapshot {
+            seed: 0,
+            phase: CombatPhase::PlayerAction,
+            player: creature("Player", true),
+            energy: 3,
+            max_energy: 3,
+            stars: 0,
+            draw_pile: Vec::new(),
+            discard_pile: Vec::new(),
+            exhaust_pile: Vec::new(),
+            monsters: vec![
+                creature("Nibbit A", true),
+                creature("Nibbit B", false),
+                creature("Nibbit C", true),
+            ],
+            hand: vec![card(target)],
+        }
+    }
+
+    fn creature(label: &str, alive: bool) -> CreatureView {
+        CreatureView {
+            label: label.to_string(),
+            hp: if alive { 10 } else { 0 },
+            max_hp: 10,
+            block: 0,
+            intent: String::new(),
+            powers: Vec::new(),
+            alive,
+        }
+    }
+
+    fn card(target: TargetType) -> CardView {
+        CardView {
+            label: "Test".to_string(),
+            card_type: "Attack".to_string(),
+            cost: "1".to_string(),
+            costs: CardCosts::default(),
+            target,
+        }
     }
 }

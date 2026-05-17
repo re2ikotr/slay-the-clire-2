@@ -11,7 +11,6 @@ pub(super) enum UiSymbol {
     Heart,
     Intent,
     Prompt,
-    Removed,
     Star,
 }
 
@@ -47,8 +46,6 @@ impl Symbols {
             (false, UiSymbol::Intent) => ">",
             (true, UiSymbol::Prompt) => "\u{203a}",
             (false, UiSymbol::Prompt) => ">",
-            (true, UiSymbol::Removed) => "\u{22a0}",
-            (false, UiSymbol::Removed) => "REM",
             (true, UiSymbol::Star) => "\u{2605}",
             (false, UiSymbol::Star) => "S",
         }

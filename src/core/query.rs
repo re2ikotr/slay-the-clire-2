@@ -119,6 +119,9 @@ pub enum DecisionQueryKind {
     ShouldDie {
         creature: CreatureId,
     },
+    ShouldRemoveCreatureAfterDeath {
+        creature: CreatureId,
+    },
     ShouldClearBlock {
         creature: CreatureId,
     },
@@ -157,6 +160,7 @@ pub enum PreventReason {
     CannotPlay,
     CannotDraw,
     CannotDie,
+    KeepsCreatureInCombat,
     NoValidTarget,
     InsufficientResource(ResourceKind),
     Custom(&'static str),

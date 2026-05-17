@@ -233,6 +233,22 @@ impl RulePipeline {
             },
         )
     }
+
+    pub fn should_remove_creature_after_death(
+        registry: &StaticRegistry,
+        state: &GameState,
+        creature: CreatureId,
+    ) -> Decision {
+        Self::decide(
+            registry,
+            state,
+            ListenerScope::Combat,
+            DecisionQuery {
+                kind: DecisionQueryKind::ShouldRemoveCreatureAfterDeath { creature },
+                source: None,
+            },
+        )
+    }
 }
 
 pub struct RuleCtx<'a> {

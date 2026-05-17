@@ -12,7 +12,7 @@ use crate::assets::{Language, Localization};
 use crate::content::cards::TargetType;
 use crate::content::monsters::NIBBIT;
 use crate::core::ids::{CardInstanceId, CreatureId};
-use crate::core::rules::RuleCtx;
+use crate::core::rules::{RuleCtx, RulePipeline};
 use crate::core::state::{
     CardCost, CardCosts, CombatPhase, CombatSetupCard, CombatSetupMonster, GameState, PileKind,
     Side, BASE_HAND_DRAW_COUNT, MAX_CARDS_IN_HAND,
@@ -541,7 +541,7 @@ fn render_snapshot(
         String::new()
     };
     println!(
-        "{}: {} {}/{}{}  {} {}/{}{}  {} {}/{}",
+        "{}: {} {}/{}{}  {} {}/{}{}",
         loc.ui("label.player"),
         loc.ui("label.hp"),
         snapshot.player.hp,
@@ -550,10 +550,7 @@ fn render_snapshot(
         loc.ui("label.energy"),
         snapshot.energy,
         snapshot.max_energy,
-        star_suffix,
-        loc.ui("label.hand"),
-        snapshot.hand.len(),
-        MAX_CARDS_IN_HAND
+        star_suffix
     );
     if !snapshot.player.powers.is_empty() {
         println!(
@@ -563,16 +560,14 @@ fn render_snapshot(
         );
     }
     println!(
-        "{}: {} {}  {} {}  {} {}  {} {}",
+        "{}: {} {}  {} {}  {} {}",
         loc.ui("label.piles"),
         loc.ui("label.draw"),
-        snapshot.draw_count,
+        snapshot.draw_pile.len(),
         loc.ui("label.discard"),
-        snapshot.discard_count,
+        snapshot.discard_pile.len(),
         loc.ui("label.exhaust"),
-        snapshot.exhaust_count,
-        loc.ui("label.removed"),
-        snapshot.removed_count
+        snapshot.exhaust_pile.len()
     );
     println!();
     println!("{}:", loc.ui("label.monsters"));
@@ -606,7 +601,12 @@ fn render_snapshot(
         println!("  {}", loc.ui("label.none"));
     }
     println!();
-    println!("{}:", loc.ui("label.hand"));
+    println!(
+        "{} {}/{}:",
+        loc.ui("label.hand"),
+        snapshot.hand.len(),
+        MAX_CARDS_IN_HAND
+    );
     for (index, card) in snapshot.hand.iter().enumerate() {
         println!(
             "  {}. {:<8} {}  {}",
@@ -675,10 +675,9 @@ struct CombatSnapshot {
     energy: i32,
     max_energy: i32,
     stars: i32,
-    draw_count: usize,
-    discard_count: usize,
-    exhaust_count: usize,
-    removed_count: usize,
+    draw_pile: Vec<CardView>,
+    discard_pile: Vec<CardView>,
+    exhaust_pile: Vec<CardView>,
     monsters: Vec<CreatureView>,
     hand: Vec<CardView>,
 }
@@ -700,6 +699,7 @@ impl CombatSnapshot {
                     .creatures
                     .iter()
                     .filter(|creature| creature.side == Side::Monsters)
+                    .filter(|creature| monster_is_visible_in_snapshot(engine, creature))
                     .map(|creature| CreatureView::from_monster(engine, creature.id, loc))
                     .collect::<Vec<_>>()
             })
@@ -729,20 +729,46 @@ impl CombatSnapshot {
                 .map(|combat| combat.player.max_energy)
                 .unwrap_or_default(),
             stars: combat.map(|combat| combat.player.stars).unwrap_or_default(),
-            draw_count: pile_count(combat, PileKind::Draw),
-            discard_count: pile_count(combat, PileKind::Discard),
-            exhaust_count: pile_count(combat, PileKind::Exhaust),
-            removed_count: pile_count(combat, PileKind::Removed),
+            draw_pile: pile_cards(combat, engine, loc, PileKind::Draw),
+            discard_pile: pile_cards(combat, engine, loc, PileKind::Discard),
+            exhaust_pile: pile_cards(combat, engine, loc, PileKind::Exhaust),
             monsters,
             hand,
         }
     }
 }
 
-fn pile_count(combat: Option<&crate::core::state::CombatState>, pile: PileKind) -> usize {
+fn pile_cards(
+    combat: Option<&crate::core::state::CombatState>,
+    engine: &Engine,
+    loc: &Localization,
+    pile: PileKind,
+) -> Vec<CardView> {
     combat
-        .map(|combat| combat.player.piles.pile(pile).len())
+        .map(|combat| {
+            combat
+                .player
+                .piles
+                .pile(pile)
+                .iter()
+                .copied()
+                .map(|card| CardView::from_card(engine, card, loc))
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+fn monster_is_visible_in_snapshot(
+    engine: &Engine,
+    creature: &crate::core::state::Creature,
+) -> bool {
+    creature.alive
+        || !RulePipeline::should_remove_creature_after_death(
+            &engine.registry,
+            &engine.state,
+            creature.id,
+        )
+        .is_allowed()
 }
 
 #[derive(Clone, Debug)]
@@ -894,6 +920,14 @@ impl CardView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
+
+    use crate::content::powers::{PowerDef, PowerRules};
+    use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
+    use crate::core::query::{Decision, DecisionQuery, DecisionQueryKind, PreventReason};
+    use crate::core::rules::prevent_by_current_listener;
+
+    const TEST_RETAIN_AFTER_DEATH: PowerId = PowerId::new("TEST_RETAIN_AFTER_DEATH");
 
     #[test]
     fn three_nibbit_test_combat_builds_three_monsters() {
@@ -908,6 +942,72 @@ mod tests {
             .monsters
             .iter()
             .all(|monster| monster.label == "Nibbit"));
+    }
+
+    #[test]
+    fn dead_non_revivable_monsters_are_hidden_from_snapshot() {
+        let registry = StaticRegistry::standard();
+        let mut engine = build_test_engine(&registry, 7, 3);
+        let first_monster = engine.state.combat().unwrap().monster_ids()[0];
+        engine.state.mark_dead(first_monster).unwrap();
+        let loc = Localization::new(Language::Eng);
+
+        let snapshot = CombatSnapshot::from_engine(&engine, &loc);
+
+        assert_eq!(snapshot.monsters.len(), 2);
+        assert!(snapshot.monsters.iter().all(|monster| monster.alive));
+    }
+
+    #[test]
+    fn dead_monsters_that_prevent_removal_stay_in_snapshot() {
+        let mut registry = StaticRegistry::standard();
+        registry.powers.register(retain_after_death_def());
+        let mut engine = build_test_engine(&registry, 7, 2);
+        let first_monster = engine.state.combat().unwrap().monster_ids()[0];
+        engine
+            .state
+            .apply_power(first_monster, TEST_RETAIN_AFTER_DEATH, Decimal::from(1))
+            .unwrap();
+        engine.state.mark_dead(first_monster).unwrap();
+        let loc = Localization::new(Language::Eng);
+
+        let snapshot = CombatSnapshot::from_engine(&engine, &loc);
+
+        assert_eq!(snapshot.monsters.len(), 2);
+        assert!(snapshot.monsters.iter().any(|monster| !monster.alive));
+    }
+
+    fn retain_after_death_def() -> PowerDef {
+        PowerDef {
+            id: TEST_RETAIN_AFTER_DEATH,
+            loc_key: LocKey::new("power.test_retain_after_death"),
+            rules: PowerRules {
+                decide: Some(prevent_owner_removal_after_death),
+                ..PowerRules::default()
+            },
+        }
+    }
+
+    fn prevent_owner_removal_after_death(
+        ctx: &RuleCtx<'_>,
+        power: PowerInstanceId,
+        query: &DecisionQuery,
+    ) -> Decision {
+        let DecisionQueryKind::ShouldRemoveCreatureAfterDeath { creature } = query.kind else {
+            return Decision::Allow;
+        };
+        let owns_power = ctx
+            .state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+            .map(|instance| instance.owner == creature)
+            .unwrap_or(false);
+
+        if owns_power {
+            prevent_by_current_listener(ctx, PreventReason::KeepsCreatureInCombat)
+        } else {
+            Decision::Allow
+        }
     }
 }
 
