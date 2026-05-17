@@ -30,6 +30,18 @@ pub enum StateChange {
         amount: i32,
     },
     DamageApplied(DamageResult),
+    HpLost {
+        target: CreatureId,
+        amount: i32,
+    },
+    Healed {
+        target: CreatureId,
+        amount: i32,
+    },
+    MaxHpGained {
+        target: CreatureId,
+        amount: i32,
+    },
     BlockGained {
         target: CreatureId,
         amount: i32,
@@ -41,6 +53,12 @@ pub enum StateChange {
     PowerApplied {
         target: CreatureId,
         power: PowerInstanceId,
+    },
+    PowerRemoved {
+        power: PowerInstanceId,
+    },
+    CardUpgraded {
+        card: CardInstanceId,
     },
     CardsShuffled {
         player: PlayerId,

@@ -9,6 +9,8 @@ pub enum Event {
     TurnEnded { side: Side },
     CardsShuffled(CardsShuffled),
     CardDrawn(CardDrawn),
+    CardExhausted(CardExhausted),
+    CardUpgraded(CardUpgraded),
     CardPlayStarted(CardPlayStarted),
     CardPlayed(CardPlayed),
     DamageDealt(DamageResult),
@@ -29,6 +31,19 @@ pub struct CardsShuffled {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CardDrawn {
+    pub player: PlayerId,
+    pub card: CardInstanceId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardExhausted {
+    pub player: PlayerId,
+    pub card: CardInstanceId,
+    pub source: Option<Source>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardUpgraded {
     pub player: PlayerId,
     pub card: CardInstanceId,
 }

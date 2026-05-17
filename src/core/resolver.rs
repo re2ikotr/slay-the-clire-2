@@ -2,12 +2,15 @@ use std::collections::VecDeque;
 
 use rust_decimal::Decimal;
 
-use crate::content::cards::{CardPlayCtx, TargetType};
+use crate::content::cards::{CardKeyword, CardPlayCtx, CardType, TargetType};
 use crate::core::command::CommandError;
-use crate::core::effect::{DamageOp, DamageResult, Effect};
+use crate::core::effect::{
+    CardFilter, DamageOp, DamageResult, Effect, MoveReason, Source, UpgradeMode,
+};
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
-    BlockGained, CardDrawn, CardsShuffled, CreatureHpChanged, Event, PowerApplied, ResourceChanged,
+    BlockGained, CardDrawn, CardExhausted, CardUpgraded, CardsShuffled, CreatureHpChanged, Event,
+    PowerApplied, ResourceChanged,
 };
 use crate::core::ids::{ChoiceId, CreatureId};
 use crate::core::listener::ListenerRef;
@@ -25,6 +28,7 @@ pub struct EffectResolver {
     queue: VecDeque<Effect>,
     pending_choice: Option<crate::core::effect::ChoiceRequest>,
     log: Vec<LogEntry>,
+    last_card_payment: std::collections::BTreeMap<crate::core::ids::CardInstanceId, CardPayment>,
 }
 
 impl EffectResolver {
@@ -96,6 +100,7 @@ impl EffectResolver {
     ) -> ApplyResult {
         match effect {
             Effect::Trigger(event) => {
+                self.record_event_stats(state, registry, &event);
                 self.log.push(LogEntry::EventTriggered(event.clone()));
                 ApplyResult::Continue(RulePipeline::notify(registry, state, &event))
             }
@@ -184,22 +189,123 @@ impl EffectResolver {
             }
             Effect::PayCardCosts { player, card } => {
                 match self.resolve_card_payment(state, registry, player, card, true) {
-                    Ok(payment) => self.spend_card_payment(state, player, payment),
+                    Ok(payment) => {
+                        self.last_card_payment.insert(card, payment);
+                        self.spend_card_payment(state, player, payment)
+                    }
                     Err(error) => ApplyResult::Rejected(error),
                 }
             }
             Effect::ExecuteCardBody { card, target, .. } => {
+                let payment = self.last_card_payment.remove(&card).unwrap_or_default();
                 let effects = state
                     .card(card)
                     .and_then(|card_state| registry.cards.get(card_state.def))
                     .map(|def| {
-                        let ctx = CardPlayCtx { state };
+                        let ctx = CardPlayCtx {
+                            state,
+                            registry,
+                            paid_energy: payment.energy,
+                            paid_stars: payment.stars,
+                        };
                         (def.play)(&ctx, card, target)
                     })
                     .unwrap_or_default();
                 ApplyResult::Continue(effects)
             }
             Effect::DealDamage(op) => self.apply_damage(state, registry, op),
+            Effect::DealDamageToAllEnemies(op) => {
+                let mut effects = Vec::new();
+                for _ in 0..op.hit_count {
+                    for target in state.alive_monster_ids() {
+                        effects.push(Effect::DealDamage(DamageOp {
+                            source: op.source,
+                            dealer: op.dealer,
+                            target,
+                            base_amount: op.base_amount,
+                            kind: op.kind,
+                            flags: op.flags,
+                        }));
+                    }
+                }
+                ApplyResult::Continue(effects)
+            }
+            Effect::DealDamageToRandomEnemy(op) => {
+                let mut effects = Vec::new();
+                for _ in 0..op.hit_count {
+                    let enemies = state.alive_monster_ids();
+                    if enemies.is_empty() {
+                        break;
+                    }
+                    let Some(index) = state.rng.combat_targets.next_usize(enemies.len()) else {
+                        break;
+                    };
+                    effects.push(Effect::DealDamage(DamageOp {
+                        source: op.source,
+                        dealer: op.dealer,
+                        target: enemies[index],
+                        base_amount: op.base_amount,
+                        kind: op.kind,
+                        flags: op.flags,
+                    }));
+                }
+                ApplyResult::Continue(effects)
+            }
+            Effect::LoseHp {
+                target,
+                amount,
+                source,
+            } => match state.lose_hp(target, amount) {
+                Ok(actual) => {
+                    self.log.push(LogEntry::StateChanged(StateChange::HpLost {
+                        target,
+                        amount: actual,
+                    }));
+                    let after = state
+                        .creature(target)
+                        .map(|creature| creature.hp)
+                        .unwrap_or(0);
+                    ApplyResult::Continue(vec![
+                        Effect::Trigger(Event::CreatureHpChanged(CreatureHpChanged {
+                            creature: target,
+                            before: after + actual,
+                            after,
+                            source,
+                        })),
+                        Effect::CheckDeaths,
+                    ])
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
+            Effect::Heal {
+                target,
+                amount,
+                source: _,
+            } => match state.heal(target, amount) {
+                Ok(actual) => {
+                    self.log.push(LogEntry::StateChanged(StateChange::Healed {
+                        target,
+                        amount: actual,
+                    }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
+            Effect::GainMaxHp {
+                target,
+                amount,
+                source: _,
+            } => match state.gain_max_hp(target, amount) {
+                Ok(actual) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::MaxHpGained {
+                            target,
+                            amount: actual,
+                        }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
             Effect::GainBlock {
                 target,
                 amount,
@@ -216,6 +322,9 @@ impl EffectResolver {
                     .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
                 match state.gain_block(target, calc.amount) {
                     Ok(actual) => {
+                        if matches!(source, Some(Source::Card(_))) && actual > 0 {
+                            state.record_card_block_gained();
+                        }
                         self.log
                             .push(LogEntry::StateChanged(StateChange::BlockGained {
                                 target,
@@ -256,8 +365,19 @@ impl EffectResolver {
                 }
                 Err(error) => ApplyResult::StateError(error),
             },
+            Effect::RemovePower { power } => match state.remove_power(power) {
+                Ok(()) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::PowerRemoved { power }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
             Effect::DrawCards { player, count } => {
                 self.apply_draw_cards(state, registry, player, count)
+            }
+            Effect::DrawUntilNonAttack { player } => {
+                self.apply_draw_until_non_attack(state, registry, player)
             }
             Effect::DiscardHand { player } => match state.discard_hand(player) {
                 Ok(cards) => {
@@ -280,15 +400,200 @@ impl EffectResolver {
                 }
                 Err(error) => ApplyResult::StateError(error),
             },
-            Effect::ClearSideBlock(side) => match state.clear_side_block(side) {
-                Ok(cleared) => {
-                    self.log.extend(cleared.into_iter().map(|(target, amount)| {
-                        LogEntry::StateChanged(StateChange::BlockCleared { target, amount })
-                    }));
-                    ApplyResult::Continue(Vec::new())
+            Effect::ExhaustCard { card } => self.apply_exhaust_card(state, registry, card),
+            Effect::ExhaustTopDraw { player, count } => {
+                let cards = state
+                    .combat()
+                    .filter(|combat| combat.player.id == player)
+                    .map(|combat| {
+                        combat
+                            .player
+                            .piles
+                            .draw
+                            .iter()
+                            .rev()
+                            .take(count as usize)
+                            .copied()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                ApplyResult::Continue(
+                    cards
+                        .into_iter()
+                        .map(|card| Effect::ExhaustCard { card })
+                        .collect(),
+                )
+            }
+            Effect::ExhaustRandomHand { player, filter } => {
+                let cards = matching_hand_cards(state, registry, player, filter);
+                let Some(index) = state.rng.combat_card_selection.next_usize(cards.len()) else {
+                    return ApplyResult::Continue(Vec::new());
+                };
+                ApplyResult::Continue(vec![Effect::ExhaustCard { card: cards[index] }])
+            }
+            Effect::ExhaustHand { player, filter } => {
+                let cards = matching_hand_cards(state, registry, player, filter);
+                ApplyResult::Continue(
+                    cards
+                        .into_iter()
+                        .map(|card| Effect::ExhaustCard { card })
+                        .collect(),
+                )
+            }
+            Effect::UpgradeCard { card } => match state.upgrade_card(card) {
+                Ok(true) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::CardUpgraded { card }));
+                    let player = state.card(card).map(|card| card.owner);
+                    ApplyResult::Continue(
+                        player
+                            .map(|player| {
+                                vec![Effect::Trigger(Event::CardUpgraded(CardUpgraded {
+                                    player,
+                                    card,
+                                }))]
+                            })
+                            .unwrap_or_default(),
+                    )
                 }
+                Ok(false) => ApplyResult::Continue(Vec::new()),
                 Err(error) => ApplyResult::StateError(error),
             },
+            Effect::UpgradeHand { player, mode } => {
+                let mut cards = matching_hand_cards(state, registry, player, CardFilter::Any)
+                    .into_iter()
+                    .filter(|card| {
+                        state
+                            .card(*card)
+                            .map(|card| !card.upgraded)
+                            .unwrap_or(false)
+                    })
+                    .collect::<Vec<_>>();
+                match mode {
+                    UpgradeMode::All => {}
+                    UpgradeMode::First => cards.truncate(1),
+                    UpgradeMode::Random => {
+                        if let Some(index) = state.rng.combat_card_selection.next_usize(cards.len())
+                        {
+                            cards = vec![cards[index]];
+                        } else {
+                            cards.clear();
+                        }
+                    }
+                }
+                ApplyResult::Continue(
+                    cards
+                        .into_iter()
+                        .map(|card| Effect::UpgradeCard { card })
+                        .collect(),
+                )
+            }
+            Effect::AddGeneratedCard {
+                player,
+                def,
+                to,
+                upgraded,
+                temporary,
+                zero_cost_this_turn,
+            } => {
+                let costs = registry
+                    .cards
+                    .get(def)
+                    .map(|def| def.costs_for(upgraded))
+                    .unwrap_or_default();
+                match state.add_generated_card(
+                    player,
+                    def,
+                    to,
+                    upgraded,
+                    costs,
+                    temporary,
+                    zero_cost_this_turn,
+                ) {
+                    Ok(card) => {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::CardMoved {
+                                card,
+                                from: None,
+                                to,
+                                reason: MoveReason::Generated,
+                            }));
+                        ApplyResult::Continue(Vec::new())
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
+            }
+            Effect::GenerateRandomCardToHand {
+                player,
+                card_type,
+                target,
+                zero_cost_this_turn,
+            } => {
+                let candidates = registry
+                    .cards
+                    .values()
+                    .filter(|def| def.can_generate_in_combat)
+                    .filter(|def| {
+                        card_type
+                            .map(|card_type| def.card_type == card_type)
+                            .unwrap_or(true)
+                    })
+                    .filter(|def| target.map(|target| def.target == target).unwrap_or(true))
+                    .map(|def| def.id)
+                    .collect::<Vec<_>>();
+                let Some(index) = state
+                    .rng
+                    .combat_card_generation
+                    .next_usize(candidates.len())
+                else {
+                    return ApplyResult::Continue(Vec::new());
+                };
+                ApplyResult::Continue(vec![Effect::AddGeneratedCard {
+                    player,
+                    def: candidates[index],
+                    to: crate::core::state::PileId::player(player, PileKind::Hand),
+                    upgraded: false,
+                    temporary: true,
+                    zero_cost_this_turn,
+                }])
+            }
+            Effect::PlayTopDrawCards {
+                player,
+                count,
+                exhaust_after_play,
+            } => self.apply_play_top_draw_cards(state, registry, player, count, exhaust_after_play),
+            Effect::ClearSideBlock(side) => {
+                let targets = state
+                    .combat()
+                    .map(|combat| {
+                        combat
+                            .creatures
+                            .iter()
+                            .filter(|creature| creature.side == side && creature.alive)
+                            .map(|creature| creature.id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for target in targets {
+                    let decision = RulePipeline::should_clear_block(registry, state, target);
+                    self.log.push(LogEntry::DecisionMade(decision.clone()));
+                    if !decision.is_allowed() {
+                        continue;
+                    }
+                    match state.clear_block(target) {
+                        Ok(amount) if amount > 0 => {
+                            self.log
+                                .push(LogEntry::StateChanged(StateChange::BlockCleared {
+                                    target,
+                                    amount,
+                                }));
+                        }
+                        Ok(_) => {}
+                        Err(error) => return ApplyResult::StateError(error),
+                    }
+                }
+                ApplyResult::Continue(Vec::new())
+            }
             Effect::ExecuteMonsterTurn => self.execute_monster_turn(state, registry),
             Effect::MoveCard { card, to, reason } => match state.move_card(card, to) {
                 Ok(from_kind) => {
@@ -316,7 +621,12 @@ impl EffectResolver {
                     Side::Monsters => CombatPhase::EnemyAction,
                 };
                 match state.set_phase(phase) {
-                    Ok(()) => ApplyResult::Continue(start_turn_effects(state, side)),
+                    Ok(()) => {
+                        if side == Side::Player {
+                            state.reset_turn_stats();
+                        }
+                        ApplyResult::Continue(start_turn_effects(state, side))
+                    }
                     Err(error) => ApplyResult::StateError(error),
                 }
             }
@@ -387,6 +697,10 @@ impl EffectResolver {
         creature.hp = creature.hp.saturating_sub(hp_loss_int).max(0);
         let hp_after = creature.hp;
         let actual_hp_loss = hp_before - hp_after;
+        let is_player = state.player_creature_id() == Some(target);
+        if is_player && actual_hp_loss > 0 {
+            state.record_player_hp_loss(actual_hp_loss);
+        }
 
         let result = DamageResult {
             source: op.source,
@@ -545,6 +859,168 @@ impl EffectResolver {
         ApplyResult::Continue(Vec::new())
     }
 
+    fn record_event_stats(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        event: &Event,
+    ) {
+        if let Event::CardPlayStarted(event) = event {
+            let is_attack = state
+                .card(event.card)
+                .and_then(|card| registry.cards.get(card.def))
+                .map(|def| def.card_type == CardType::Attack)
+                .unwrap_or(false);
+            if is_attack {
+                state.record_attack_played();
+            }
+        }
+    }
+
+    fn apply_exhaust_card(
+        &mut self,
+        state: &mut GameState,
+        _registry: &StaticRegistry,
+        card: crate::core::ids::CardInstanceId,
+    ) -> ApplyResult {
+        let Some(player) = state.card(card).map(|card| card.owner) else {
+            return ApplyResult::StateError(StateError::UnknownCard(card));
+        };
+        match state.exhaust_card(card) {
+            Ok(from_kind) => {
+                state.record_card_exhausted();
+                let to = crate::core::state::PileId::player(player, PileKind::Exhaust);
+                self.log
+                    .push(LogEntry::StateChanged(StateChange::CardMoved {
+                        card,
+                        from: from_kind.map(|kind| crate::core::state::PileId {
+                            owner: player,
+                            kind,
+                        }),
+                        to,
+                        reason: MoveReason::Exhaust,
+                    }));
+                ApplyResult::Continue(vec![Effect::Trigger(Event::CardExhausted(CardExhausted {
+                    player,
+                    card,
+                    source: None,
+                }))])
+            }
+            Err(error) => ApplyResult::StateError(error),
+        }
+    }
+
+    fn apply_draw_until_non_attack(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: crate::core::ids::PlayerId,
+    ) -> ApplyResult {
+        loop {
+            let before = state
+                .combat()
+                .map(|combat| combat.player.piles.hand.len())
+                .unwrap_or_default();
+            match self.apply_draw_cards(state, registry, player, 1) {
+                ApplyResult::Continue(_) => {}
+                other => return other,
+            }
+            let Some(card) = state
+                .combat()
+                .and_then(|combat| combat.player.piles.hand.last().copied())
+            else {
+                return ApplyResult::Continue(Vec::new());
+            };
+            let after = state
+                .combat()
+                .map(|combat| combat.player.piles.hand.len())
+                .unwrap_or_default();
+            if after == before {
+                return ApplyResult::Continue(Vec::new());
+            }
+            let is_attack = state
+                .card(card)
+                .and_then(|card| registry.cards.get(card.def))
+                .map(|def| def.card_type == CardType::Attack)
+                .unwrap_or(false);
+            if !is_attack {
+                return ApplyResult::Continue(Vec::new());
+            }
+        }
+    }
+
+    fn apply_play_top_draw_cards(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: crate::core::ids::PlayerId,
+        count: u8,
+        exhaust_after_play: bool,
+    ) -> ApplyResult {
+        let cards = state
+            .combat()
+            .filter(|combat| combat.player.id == player)
+            .map(|combat| {
+                combat
+                    .player
+                    .piles
+                    .draw
+                    .iter()
+                    .rev()
+                    .take(count as usize)
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let target = state.alive_monster_ids().first().copied();
+        for card in cards {
+            let play = crate::core::state::PileId::player(player, PileKind::Play);
+            let result = if exhaust_after_play {
+                (
+                    crate::core::state::PileId::player(player, PileKind::Exhaust),
+                    MoveReason::Exhaust,
+                )
+            } else {
+                card_auto_result_pile(state, registry, player, card)
+            };
+            let effects = vec![
+                Effect::MoveCard {
+                    card,
+                    to: play,
+                    reason: MoveReason::Play,
+                },
+                Effect::Trigger(Event::CardPlayStarted(
+                    crate::core::event::CardPlayStarted {
+                        player,
+                        card,
+                        target,
+                    },
+                )),
+                Effect::ExecuteCardBody {
+                    player,
+                    card,
+                    target,
+                },
+                Effect::MoveCard {
+                    card,
+                    to: result.0,
+                    reason: result.1,
+                },
+                Effect::Trigger(Event::CardPlayed(crate::core::event::CardPlayed {
+                    player,
+                    card,
+                    target,
+                })),
+            ];
+            match self.apply_immediate_effects(state, registry, effects) {
+                ApplyResult::Continue(_) => {}
+                other => return other,
+            }
+        }
+        ApplyResult::Continue(Vec::new())
+    }
+
     fn resolve_card_payment(
         &mut self,
         state: &GameState,
@@ -554,7 +1030,15 @@ impl EffectResolver {
         log_modifiers: bool,
     ) -> Result<CardPayment, CommandError> {
         let card_state = state.card(card).ok_or(CommandError::InvalidCard(card))?;
-        let costs = card_state.effective_costs();
+        let def_costs = registry
+            .cards
+            .get(card_state.def)
+            .map(|def| def.costs_for(card_state.upgraded))
+            .unwrap_or(card_state.costs);
+        let costs = crate::core::state::CardCosts {
+            energy: card_state.temp_costs.energy.unwrap_or(def_costs.energy),
+            stars: card_state.temp_costs.stars.unwrap_or(def_costs.stars),
+        };
 
         Ok(CardPayment {
             energy: self.resolve_resource_cost(
@@ -689,10 +1173,77 @@ impl EffectResolver {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CardPayment {
     energy: i32,
     stars: i32,
+}
+
+fn matching_hand_cards(
+    state: &GameState,
+    registry: &StaticRegistry,
+    player: crate::core::ids::PlayerId,
+    filter: CardFilter,
+) -> Vec<crate::core::ids::CardInstanceId> {
+    let Some(combat) = state.combat().filter(|combat| combat.player.id == player) else {
+        return Vec::new();
+    };
+    combat
+        .player
+        .piles
+        .hand
+        .iter()
+        .copied()
+        .filter(|card| match filter {
+            CardFilter::Any => true,
+            CardFilter::Attack => state
+                .card(*card)
+                .and_then(|card| registry.cards.get(card.def))
+                .map(|def| def.card_type == CardType::Attack)
+                .unwrap_or(false),
+            CardFilter::NonAttack => state
+                .card(*card)
+                .and_then(|card| registry.cards.get(card.def))
+                .map(|def| def.card_type != CardType::Attack)
+                .unwrap_or(false),
+        })
+        .collect()
+}
+
+fn card_auto_result_pile(
+    state: &GameState,
+    registry: &StaticRegistry,
+    player: crate::core::ids::PlayerId,
+    card: crate::core::ids::CardInstanceId,
+) -> (crate::core::state::PileId, MoveReason) {
+    let Some(card_state) = state.card(card) else {
+        return (
+            crate::core::state::PileId::player(player, PileKind::Discard),
+            MoveReason::Discard,
+        );
+    };
+    let Some(def) = registry.cards.get(card_state.def) else {
+        return (
+            crate::core::state::PileId::player(player, PileKind::Discard),
+            MoveReason::Discard,
+        );
+    };
+    if def.card_type == CardType::Power || card_state.flags.purge_on_use {
+        (
+            crate::core::state::PileId::player(player, PileKind::Removed),
+            MoveReason::Removed,
+        )
+    } else if def.has_keyword(card_state.upgraded, CardKeyword::Exhaust) {
+        (
+            crate::core::state::PileId::player(player, PileKind::Exhaust),
+            MoveReason::Exhaust,
+        )
+    } else {
+        (
+            crate::core::state::PileId::player(player, PileKind::Discard),
+            MoveReason::Discard,
+        )
+    }
 }
 
 fn command_error_from_state(error: StateError) -> CommandError {
@@ -732,12 +1283,24 @@ fn validate_card_target(
                 _ => Err(PreventReason::NoValidTarget),
             }
         }
-        TargetType::AllEnemies => Ok(()),
+        TargetType::AllEnemies | TargetType::RandomEnemy => Ok(()),
         TargetType::SelfTarget => {
             if target.is_none() || target == state.player_creature_id() {
                 Ok(())
             } else {
                 Err(PreventReason::NoValidTarget)
+            }
+        }
+        TargetType::AnyAlly => {
+            if target.is_none() || target == state.player_creature_id() {
+                return Ok(());
+            }
+            let Some(target) = target else {
+                return Err(PreventReason::NoValidTarget);
+            };
+            match state.creature(target) {
+                Some(creature) if creature.side == Side::Player && creature.alive => Ok(()),
+                _ => Err(PreventReason::NoValidTarget),
             }
         }
         TargetType::AnyCreature => {
@@ -821,6 +1384,7 @@ fn monster_action_effects(
     let def = registry.monsters.get(model)?;
     let ctx = RuleCtx {
         state,
+        registry,
         listener: Some(ListenerRef::Monster(monster)),
     };
     Some((def.act)(&ctx, monster))
@@ -889,6 +1453,11 @@ mod tests {
             rarity: CardRarity::Basic,
             target: TargetType::Enemy,
             base_costs: CardCosts::energy(1),
+            upgraded_costs: None,
+            keywords: &[],
+            upgraded_keywords: &[],
+            tags: &[],
+            can_generate_in_combat: true,
             play: test_strike_body,
             rules: CardRules::default(),
         }

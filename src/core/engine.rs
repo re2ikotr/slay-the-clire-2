@@ -1,3 +1,5 @@
+use crate::content::cards::{CardKeyword, CardType};
+use crate::content::powers::CORRUPTION_POWER;
 use crate::core::command::{Command, CommandError};
 use crate::core::effect::{Effect, MoveReason};
 use crate::core::event::{CardPlayStarted, CardPlayed, Event};
@@ -40,7 +42,7 @@ impl Engine {
             return StepResult::Rejected(CommandError::UnexpectedChoice, self.resolver.take_log());
         }
 
-        match command_to_effects(&self.state, command) {
+        match command_to_effects(&self.state, &self.registry, command) {
             Ok(effects) => {
                 self.resolver.enqueue_all(effects);
                 self.resolver.drain(&mut self.state, &self.registry)
@@ -70,7 +72,11 @@ pub enum CombatOutcome {
     Defeat,
 }
 
-fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>, CommandError> {
+fn command_to_effects(
+    state: &GameState,
+    registry: &StaticRegistry,
+    command: Command,
+) -> Result<Vec<Effect>, CommandError> {
     match command {
         Command::PlayCard {
             player,
@@ -85,7 +91,8 @@ fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>
                 return Err(CommandError::InvalidCard(card));
             }
 
-            let discard = PileId::player(player, PileKind::Discard);
+            let play = PileId::player(player, PileKind::Play);
+            let (result_pile, result_reason) = card_result_pile(state, registry, player, card)?;
             Ok(vec![
                 Effect::ValidateCardPlay {
                     player,
@@ -98,6 +105,11 @@ fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>
                     target,
                 })),
                 Effect::PayCardCosts { player, card },
+                Effect::MoveCard {
+                    card,
+                    to: play,
+                    reason: MoveReason::Play,
+                },
                 Effect::ExecuteCardBody {
                     player,
                     card,
@@ -105,8 +117,8 @@ fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>
                 },
                 Effect::MoveCard {
                     card,
-                    to: discard,
-                    reason: MoveReason::Discard,
+                    to: result_pile,
+                    reason: result_reason,
                 },
                 Effect::Trigger(Event::CardPlayed(CardPlayed {
                     player,
@@ -123,6 +135,46 @@ fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>
         ]),
         Command::UsePotion { .. } => Ok(vec![]),
         Command::Choose { .. } => Err(CommandError::UnexpectedChoice),
+    }
+}
+
+fn card_result_pile(
+    state: &GameState,
+    registry: &StaticRegistry,
+    player: crate::core::ids::PlayerId,
+    card: crate::core::ids::CardInstanceId,
+) -> Result<(PileId, MoveReason), CommandError> {
+    let card_state = state.card(card).ok_or(CommandError::InvalidCard(card))?;
+    let Some(def) = registry.cards.get(card_state.def) else {
+        return Ok((
+            PileId::player(player, PileKind::Discard),
+            MoveReason::Discard,
+        ));
+    };
+
+    let corruption_exhausts_skill = def.card_type == CardType::Skill
+        && state
+            .player_creature_id()
+            .map(|creature| state.has_power(creature, CORRUPTION_POWER))
+            .unwrap_or(false);
+
+    if def.card_type == CardType::Power || card_state.flags.purge_on_use {
+        Ok((
+            PileId::player(player, PileKind::Removed),
+            MoveReason::Removed,
+        ))
+    } else if def.has_keyword(card_state.upgraded, CardKeyword::Exhaust)
+        || corruption_exhausts_skill
+    {
+        Ok((
+            PileId::player(player, PileKind::Exhaust),
+            MoveReason::Exhaust,
+        ))
+    } else {
+        Ok((
+            PileId::player(player, PileKind::Discard),
+            MoveReason::Discard,
+        ))
     }
 }
 
@@ -153,11 +205,15 @@ pub(crate) fn combat_result_for_state(state: &GameState) -> Option<CombatResult>
 
 #[cfg(test)]
 mod tests {
-    use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
+    use crate::content::cards::{
+        BASH, BATTLE_TRANCE, BLOODLETTING, DEFEND_IRONCLAD, POMMEL_STRIKE, STRIKE_IRONCLAD,
+    };
+    use crate::content::powers::{NO_DRAW_POWER, VULNERABLE};
     use crate::core::event::Event;
+    use crate::core::ids::CardId;
     use crate::core::ids::{CardInstanceId, CreatureId};
     use crate::core::log::{LogEntry, StateChange};
-    use crate::core::state::ResourceKind;
+    use crate::core::state::{PileId, PileKind, ResourceKind};
 
     use super::*;
 
@@ -255,6 +311,91 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn bash_damages_nibbit_and_applies_vulnerable() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(31));
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.combat().unwrap().monster_ids()[0];
+        let bash = add_card_to_hand(&mut engine, BASH, false);
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card: bash,
+            target: Some(enemy),
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(engine.state.creature(enemy).unwrap().hp, 34);
+        assert_eq!(engine.state.power_amount(enemy, VULNERABLE), 2);
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.player.energy, 1);
+        assert!(combat.player.piles.discard.contains(&bash));
+    }
+
+    #[test]
+    fn pommel_strike_damages_nibbit_and_draws_card() {
+        let mut engine = Engine::new(GameState::full_nibbit_combat(32));
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.combat().unwrap().monster_ids()[0];
+        let pommel = add_card_to_hand(&mut engine, POMMEL_STRIKE, false);
+        let before = engine.state.combat().unwrap().player.piles.draw.len();
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card: pommel,
+            target: Some(enemy),
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(engine.state.creature(enemy).unwrap().hp, 33);
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.player.piles.draw.len(), before - 1);
+        assert_eq!(combat.player.piles.hand.len(), 3);
+        assert!(combat.player.piles.discard.contains(&pommel));
+    }
+
+    #[test]
+    fn battle_trance_draws_then_blocks_more_draws_this_turn() {
+        let mut engine = Engine::new(GameState::full_nibbit_combat(33));
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        let battle_trance = add_card_to_hand(&mut engine, BATTLE_TRANCE, false);
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card: battle_trance,
+            target: None,
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(engine.state.power_amount(player_creature, NO_DRAW_POWER), 1);
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.player.energy, 3);
+        assert_eq!(combat.player.piles.hand.len(), 5);
+        assert_eq!(combat.player.piles.draw.len(), 4);
+        assert!(combat.player.piles.discard.contains(&battle_trance));
+    }
+
+    #[test]
+    fn bloodletting_loses_hp_and_gains_energy_against_nibbit() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(34));
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        let bloodletting = add_card_to_hand(&mut engine, BLOODLETTING, false);
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card: bloodletting,
+            target: None,
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(engine.state.creature(player_creature).unwrap().hp, 47);
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(combat.player.energy, 5);
+        assert!(combat.player.piles.discard.contains(&bloodletting));
+    }
+
     fn run_auto_nibbit_combat(engine: &mut Engine) -> (CombatOutcome, Vec<LogEntry>) {
         let player = engine.state.player_id().unwrap();
         let enemy = engine.state.combat().unwrap().monster_ids()[0];
@@ -327,5 +468,15 @@ mod tests {
         }
 
         fallback
+    }
+
+    fn add_card_to_hand(engine: &mut Engine, def: CardId, upgraded: bool) -> CardInstanceId {
+        let player = engine.state.player_id().unwrap();
+        let to = PileId::player(player, PileKind::Hand);
+        let costs = engine.registry.cards.get(def).unwrap().costs_for(upgraded);
+        engine
+            .state
+            .add_generated_card(player, def, to, upgraded, costs, false, false)
+            .unwrap()
     }
 }

@@ -1,8 +1,9 @@
 use rust_decimal::Decimal;
 
+use crate::content::cards::{CardType, TargetType};
 use crate::core::event::Event;
 use crate::core::ids::{
-    CardInstanceId, ChoiceId, CreatureId, LocKey, PlayerId, PotionInstanceId, PowerId,
+    CardId, CardInstanceId, ChoiceId, CreatureId, LocKey, PlayerId, PotionInstanceId, PowerId,
     PowerInstanceId, RelicInstanceId,
 };
 use crate::core::state::{CombatPhase, PileId, ResourceKind, Side};
@@ -35,6 +36,23 @@ pub enum Effect {
         target: Option<CreatureId>,
     },
     DealDamage(DamageOp),
+    DealDamageToAllEnemies(DamageAllEnemiesOp),
+    DealDamageToRandomEnemy(RandomDamageOp),
+    LoseHp {
+        target: CreatureId,
+        amount: Decimal,
+        source: Option<Source>,
+    },
+    Heal {
+        target: CreatureId,
+        amount: Decimal,
+        source: Option<Source>,
+    },
+    GainMaxHp {
+        target: CreatureId,
+        amount: i32,
+        source: Option<Source>,
+    },
     GainBlock {
         target: CreatureId,
         amount: Decimal,
@@ -46,12 +64,59 @@ pub enum Effect {
         amount: Decimal,
         source: Option<Source>,
     },
+    RemovePower {
+        power: PowerInstanceId,
+    },
     DrawCards {
         player: PlayerId,
         count: u8,
     },
+    DrawUntilNonAttack {
+        player: PlayerId,
+    },
     DiscardHand {
         player: PlayerId,
+    },
+    ExhaustCard {
+        card: CardInstanceId,
+    },
+    ExhaustTopDraw {
+        player: PlayerId,
+        count: u8,
+    },
+    ExhaustRandomHand {
+        player: PlayerId,
+        filter: CardFilter,
+    },
+    ExhaustHand {
+        player: PlayerId,
+        filter: CardFilter,
+    },
+    UpgradeCard {
+        card: CardInstanceId,
+    },
+    UpgradeHand {
+        player: PlayerId,
+        mode: UpgradeMode,
+    },
+    AddGeneratedCard {
+        player: PlayerId,
+        def: CardId,
+        to: PileId,
+        upgraded: bool,
+        temporary: bool,
+        zero_cost_this_turn: bool,
+    },
+    GenerateRandomCardToHand {
+        player: PlayerId,
+        card_type: Option<CardType>,
+        target: Option<TargetType>,
+        zero_cost_this_turn: bool,
+    },
+    PlayTopDrawCards {
+        player: PlayerId,
+        count: u8,
+        exhaust_after_play: bool,
     },
     ClearSideBlock(Side),
     ExecuteMonsterTurn,
@@ -105,6 +170,26 @@ pub struct DamageOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamageAllEnemiesOp {
+    pub source: Option<Source>,
+    pub dealer: Option<CreatureId>,
+    pub base_amount: Decimal,
+    pub kind: DamageKind,
+    pub flags: DamageFlags,
+    pub hit_count: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RandomDamageOp {
+    pub source: Option<Source>,
+    pub dealer: Option<CreatureId>,
+    pub base_amount: Decimal,
+    pub kind: DamageKind,
+    pub flags: DamageFlags,
+    pub hit_count: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DamageResult {
     pub source: Option<Source>,
     pub dealer: Option<CreatureId>,
@@ -124,6 +209,20 @@ pub enum MoveReason {
     Generated,
     Cleanup,
     Removed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardFilter {
+    Any,
+    Attack,
+    NonAttack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpgradeMode {
+    First,
+    All,
+    Random,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

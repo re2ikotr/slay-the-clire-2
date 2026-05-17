@@ -54,6 +54,10 @@ where
     pub fn is_empty(&self) -> bool {
         self.defs.is_empty()
     }
+
+    pub fn values(&self) -> impl Iterator<Item = &Def> {
+        self.defs.values()
+    }
 }
 
 impl RegistryDef for CardDef {
@@ -117,13 +121,8 @@ impl StaticRegistry {
 
     pub fn standard() -> Self {
         let mut registry = Self::empty();
-        registry
-            .cards
-            .register(crate::content::cards::strike_ironclad());
-        registry
-            .cards
-            .register(crate::content::cards::defend_ironclad());
-        registry.powers.register(crate::content::powers::strength());
+        crate::content::cards::register_ironclad_cards(&mut registry.cards);
+        crate::content::powers::register_core_powers(&mut registry.powers);
         registry
             .monsters
             .register(crate::content::monsters::nibbit());

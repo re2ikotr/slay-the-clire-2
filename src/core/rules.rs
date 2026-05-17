@@ -22,6 +22,7 @@ impl RulePipeline {
         for listener in listeners {
             let ctx = RuleCtx {
                 state,
+                registry,
                 listener: Some(listener),
             };
             out.extend(dispatch_event(registry, state, listener, &ctx, event));
@@ -53,6 +54,7 @@ impl RulePipeline {
                 let before = calc.amount;
                 let ctx = RuleCtx {
                     state,
+                    registry,
                     listener: Some(listener),
                 };
                 calc = dispatch_modify_damage(registry, state, listener, &ctx, phase, calc);
@@ -89,6 +91,7 @@ impl RulePipeline {
                 let before = calc.amount;
                 let ctx = RuleCtx {
                     state,
+                    registry,
                     listener: Some(listener),
                 };
                 calc = dispatch_modify_block(registry, state, listener, &ctx, phase, calc);
@@ -119,6 +122,7 @@ impl RulePipeline {
             let before = calc.cost;
             let ctx = RuleCtx {
                 state,
+                registry,
                 listener: Some(listener),
             };
             calc = dispatch_modify_resource_cost(registry, state, listener, &ctx, calc);
@@ -144,6 +148,7 @@ impl RulePipeline {
         for listener in collect_combat_listeners(state, scope) {
             let ctx = RuleCtx {
                 state,
+                registry,
                 listener: Some(listener),
             };
             match dispatch_decision(registry, state, listener, &ctx, &query) {
@@ -232,6 +237,7 @@ impl RulePipeline {
 
 pub struct RuleCtx<'a> {
     pub state: &'a GameState,
+    pub registry: &'a StaticRegistry,
     pub listener: Option<ListenerRef>,
 }
 
@@ -526,6 +532,8 @@ fn event_scope(event: &Event) -> ListenerScope {
     match event {
         Event::CardsShuffled(_) => ListenerScope::Combat,
         Event::CardDrawn(event) => ListenerScope::Source(Source::Card(event.card)),
+        Event::CardExhausted(event) => ListenerScope::Source(Source::Card(event.card)),
+        Event::CardUpgraded(event) => ListenerScope::Source(Source::Card(event.card)),
         Event::CardPlayStarted(event) => ListenerScope::Source(Source::Card(event.card)),
         Event::CardPlayed(event) => ListenerScope::Source(Source::Card(event.card)),
         Event::DamageDealt(event) => ListenerScope::Creature(event.target),

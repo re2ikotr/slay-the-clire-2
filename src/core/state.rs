@@ -95,6 +95,13 @@ impl CardCosts {
             stars: CardCost::None,
         }
     }
+
+    pub const fn x_energy() -> Self {
+        Self {
+            energy: CardCost::X,
+            stars: CardCost::None,
+        }
+    }
 }
 
 impl Default for CardCosts {
@@ -114,6 +121,7 @@ pub struct CardFlags {
     pub ethereal: bool,
     pub temporary: bool,
     pub purge_on_use: bool,
+    pub zero_cost_this_turn: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,6 +298,9 @@ pub struct CombatState {
     pub relics: BTreeMap<RelicInstanceId, RelicInstance>,
     pub potions: BTreeMap<PotionInstanceId, PotionInstance>,
     pub modifiers: Vec<ModifierInstanceId>,
+    pub turn_stats: CombatTurnStats,
+    pub combat_stats: CombatStats,
+    next_card_instance: u32,
     next_power_instance: u32,
 }
 
@@ -307,6 +318,25 @@ impl CombatState {
         self.next_power_instance += 1;
         id
     }
+
+    fn alloc_card_instance_id(&mut self) -> CardInstanceId {
+        let id = CardInstanceId::new(self.next_card_instance);
+        self.next_card_instance += 1;
+        id
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CombatTurnStats {
+    pub attacks_played: u32,
+    pub cards_exhausted: u32,
+    pub hp_lost_by_player: i32,
+    pub card_block_gains: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CombatStats {
+    pub hp_loss_events_by_player: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,6 +415,9 @@ impl GameState {
             relics: BTreeMap::new(),
             potions: BTreeMap::new(),
             modifiers: Vec::new(),
+            turn_stats: CombatTurnStats::default(),
+            combat_stats: CombatStats::default(),
+            next_card_instance: 2,
             next_power_instance: 1,
         };
 
@@ -452,6 +485,9 @@ impl GameState {
             relics: BTreeMap::new(),
             potions: BTreeMap::new(),
             modifiers: Vec::new(),
+            turn_stats: CombatTurnStats::default(),
+            combat_stats: CombatStats::default(),
+            next_card_instance: 3,
             next_power_instance: 1,
         };
 
@@ -536,6 +572,9 @@ impl GameState {
             relics: BTreeMap::new(),
             potions: BTreeMap::new(),
             modifiers: Vec::new(),
+            turn_stats: CombatTurnStats::default(),
+            combat_stats: CombatStats::default(),
+            next_card_instance: 10,
             next_power_instance: 1,
         };
 
@@ -582,10 +621,49 @@ impl GameState {
         self.combat.as_ref()?.cards.get(&id)
     }
 
+    pub fn card_mut(&mut self, id: CardInstanceId) -> Option<&mut CardInstance> {
+        self.combat.as_mut()?.cards.get_mut(&id)
+    }
+
     pub fn card_is_in_pile(&self, id: CardInstanceId, pile: PileKind) -> bool {
         self.card(id)
             .map(|card| card.pile.kind == pile)
             .unwrap_or(false)
+    }
+
+    pub fn alive_monster_ids(&self) -> Vec<CreatureId> {
+        self.combat
+            .as_ref()
+            .map(|combat| {
+                combat
+                    .creatures
+                    .iter()
+                    .filter(|creature| creature.side == Side::Monsters && creature.alive)
+                    .map(|creature| creature.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn power_amount(&self, owner: CreatureId, power: PowerId) -> i32 {
+        self.combat
+            .as_ref()
+            .and_then(|combat| {
+                self.creature(owner).map(|creature| {
+                    creature
+                        .powers
+                        .iter()
+                        .filter_map(|id| combat.powers.get(id))
+                        .filter(|instance| instance.def == power)
+                        .map(|instance| instance.amount)
+                        .sum()
+                })
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn has_power(&self, owner: CreatureId, power: PowerId) -> bool {
+        self.power_amount(owner, power) != 0
     }
 
     pub fn resource_amount(
@@ -665,6 +743,41 @@ impl GameState {
         Ok(creature.block - before)
     }
 
+    pub fn lose_hp(&mut self, target: CreatureId, amount: Decimal) -> Result<i32, StateError> {
+        let hp_loss = decimal_to_i32_trunc(amount).max(0);
+        let player = self.player_creature_id();
+        let creature = self
+            .creature_mut(target)
+            .ok_or(StateError::UnknownCreature(target))?;
+        let before = creature.hp;
+        creature.hp = creature.hp.saturating_sub(hp_loss).max(0);
+        let actual = before - creature.hp;
+        if actual > 0 && Some(target) == player {
+            self.record_player_hp_loss(actual);
+        }
+        Ok(actual)
+    }
+
+    pub fn heal(&mut self, target: CreatureId, amount: Decimal) -> Result<i32, StateError> {
+        let creature = self
+            .creature_mut(target)
+            .ok_or(StateError::UnknownCreature(target))?;
+        let before = creature.hp;
+        let amount = decimal_to_i32_trunc(amount).max(0);
+        creature.hp = creature.hp.saturating_add(amount).min(creature.max_hp);
+        Ok(creature.hp - before)
+    }
+
+    pub fn gain_max_hp(&mut self, target: CreatureId, amount: i32) -> Result<i32, StateError> {
+        let creature = self
+            .creature_mut(target)
+            .ok_or(StateError::UnknownCreature(target))?;
+        let amount = amount.max(0);
+        creature.max_hp = creature.max_hp.saturating_add(amount);
+        creature.hp = creature.hp.saturating_add(amount).min(creature.max_hp);
+        Ok(amount)
+    }
+
     pub fn move_card(
         &mut self,
         card: CardInstanceId,
@@ -689,6 +802,64 @@ impl GameState {
         }
 
         Ok(from)
+    }
+
+    pub fn add_generated_card(
+        &mut self,
+        player: PlayerId,
+        def: CardId,
+        to: PileId,
+        upgraded: bool,
+        costs: CardCosts,
+        temporary: bool,
+        zero_cost_this_turn: bool,
+    ) -> Result<CardInstanceId, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player || to.owner != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+
+        let id = combat.alloc_card_instance_id();
+        combat.cards.insert(
+            id,
+            CardInstance {
+                id,
+                def,
+                owner: player,
+                upgraded,
+                costs,
+                temp_costs: if zero_cost_this_turn {
+                    TemporaryCardCosts {
+                        energy: Some(CardCost::Fixed(0)),
+                        stars: None,
+                    }
+                } else {
+                    TemporaryCardCosts::default()
+                },
+                pile: to,
+                flags: CardFlags {
+                    temporary,
+                    zero_cost_this_turn,
+                    ..CardFlags::default()
+                },
+            },
+        );
+        combat.player.piles.push(to.kind, id);
+        Ok(id)
+    }
+
+    pub fn exhaust_card(&mut self, card: CardInstanceId) -> Result<Option<PileKind>, StateError> {
+        let owner = self.card(card).ok_or(StateError::UnknownCard(card))?.owner;
+        self.move_card(card, PileId::player(owner, PileKind::Exhaust))
+    }
+
+    pub fn upgrade_card(&mut self, card: CardInstanceId) -> Result<bool, StateError> {
+        let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
+        if card.upgraded {
+            return Ok(false);
+        }
+        card.upgraded = true;
+        Ok(true)
     }
 
     pub fn shuffle_discard_into_draw_if_needed(
@@ -787,6 +958,15 @@ impl GameState {
         Ok(cleared)
     }
 
+    pub fn clear_block(&mut self, target: CreatureId) -> Result<i32, StateError> {
+        let creature = self
+            .creature_mut(target)
+            .ok_or(StateError::UnknownCreature(target))?;
+        let amount = creature.block;
+        creature.block = 0;
+        Ok(amount)
+    }
+
     pub fn increment_turns_taken(&mut self, creature: CreatureId) -> Result<(), StateError> {
         let creature = self
             .creature_mut(creature)
@@ -842,6 +1022,21 @@ impl GameState {
         Ok((id, amount))
     }
 
+    pub fn remove_power(&mut self, power: PowerInstanceId) -> Result<(), StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let Some(instance) = combat.powers.remove(&power) else {
+            return Ok(());
+        };
+        if let Some(creature) = combat
+            .creatures
+            .iter_mut()
+            .find(|creature| creature.id == instance.owner)
+        {
+            creature.powers.retain(|existing| *existing != power);
+        }
+        Ok(())
+    }
+
     pub fn death_candidates(&self) -> Vec<CreatureId> {
         self.combat
             .as_ref()
@@ -868,6 +1063,40 @@ impl GameState {
         let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
         combat.phase = phase;
         Ok(())
+    }
+
+    pub fn reset_turn_stats(&mut self) {
+        if let Some(combat) = self.combat.as_mut() {
+            combat.turn_stats = CombatTurnStats::default();
+        }
+    }
+
+    pub fn record_attack_played(&mut self) {
+        if let Some(combat) = self.combat.as_mut() {
+            combat.turn_stats.attacks_played += 1;
+        }
+    }
+
+    pub fn record_card_exhausted(&mut self) {
+        if let Some(combat) = self.combat.as_mut() {
+            combat.turn_stats.cards_exhausted += 1;
+        }
+    }
+
+    pub fn record_card_block_gained(&mut self) {
+        if let Some(combat) = self.combat.as_mut() {
+            combat.turn_stats.card_block_gains += 1;
+        }
+    }
+
+    pub fn record_player_hp_loss(&mut self, amount: i32) {
+        if amount <= 0 {
+            return;
+        }
+        if let Some(combat) = self.combat.as_mut() {
+            combat.turn_stats.hp_lost_by_player += amount;
+            combat.combat_stats.hp_loss_events_by_player += 1;
+        }
     }
 }
 

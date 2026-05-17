@@ -156,6 +156,7 @@ fn monster_intent(engine: &Engine, enemy: CreatureId) -> MonsterIntent {
     };
     let ctx = RuleCtx {
         state: &engine.state,
+        registry: &engine.registry,
         listener: None,
     };
     (def.intent)(&ctx, enemy)
