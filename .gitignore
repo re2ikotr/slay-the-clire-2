@@ -23,7 +23,8 @@ target/
 
 # Logs
 *.log
-logs/
+logs/*
+!logs/.gitkeep
 
 # Editor / OS
 .vscode/

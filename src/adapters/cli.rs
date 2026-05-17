@@ -1,3 +1,4 @@
+use crate::adapters::log_store::StepLogSink;
 use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
 use crate::content::monsters::MonsterIntent;
 use crate::core::ids::{CardInstanceId, CreatureId};
@@ -6,6 +7,7 @@ use crate::core::{CombatPhase, Command, Engine, GameState, Side, StepResult};
 
 pub fn run() {
     let mut engine = Engine::new(GameState::full_nibbit_combat(0));
+    let mut log_sink = create_log_sink("smoke");
     let player = engine.state.player_id().expect("demo combat has a player");
     let enemy = engine
         .state
@@ -35,6 +37,7 @@ pub fn run() {
                     card,
                     target,
                 }),
+                &mut log_sink,
             );
             print_state("after play", &engine, enemy);
             if finished {
@@ -45,10 +48,24 @@ pub fn run() {
         let finished = print_result(
             "end turn",
             engine.step(Command::EndTurn { side: Side::Player }),
+            &mut log_sink,
         );
         print_state("after turn cycle", &engine, enemy);
         if finished {
             return;
+        }
+    }
+}
+
+fn create_log_sink(session: &str) -> Option<StepLogSink> {
+    match StepLogSink::create(session) {
+        Ok(sink) => {
+            println!("log file: {}", sink.path().display());
+            Some(sink)
+        }
+        Err(error) => {
+            eprintln!("log disabled: {error}");
+            None
         }
     }
 }
@@ -93,7 +110,14 @@ fn next_card_to_play(
     fallback
 }
 
-fn print_result(label: &str, result: StepResult) -> bool {
+fn print_result(label: &str, result: StepResult, log_sink: &mut Option<StepLogSink>) -> bool {
+    if let Some(sink) = log_sink.as_mut() {
+        if let Err(error) = sink.record_step(label, &result) {
+            eprintln!("failed to write step log: {error}");
+            *log_sink = None;
+        }
+    }
+
     match result {
         StepResult::Done(log) => {
             println!("{label}: done ({} log entries)", log.len());

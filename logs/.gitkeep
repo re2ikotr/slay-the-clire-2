@@ -1,0 +1,1 @@
+# Keeps the local log directory in git. Runtime log files are ignored.
