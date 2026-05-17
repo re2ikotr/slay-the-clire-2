@@ -1,6 +1,12 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
 
+mod animation;
+mod profile;
+mod ratatui_renderer;
+mod symbols;
+mod theme;
+
 use crate::adapters::log_store::StepLogSink;
 use crate::assets::{Language, Localization};
 use crate::content::cards::TargetType;
@@ -15,26 +21,32 @@ use crate::core::{Command, Engine, StepResult};
 use crate::registry::StaticRegistry;
 
 const TEST_DECK_SIZE: usize = 25;
+const DEFAULT_NIBBIT_COUNT: usize = 3;
 const PLAYER_MAX_HP: i32 = 80;
 const PLAYER_MAX_ENERGY: i32 = 3;
 const MAX_MESSAGES: usize = 8;
 
 pub fn run() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let plain = args.iter().any(|arg| arg == "--plain") || should_fallback_to_plain();
+    let profile = profile::TerminalProfile::detect(&args);
     let seed = parse_seed(&args).unwrap_or(0);
-    let language = parse_language(&args).unwrap_or_else(Language::from_env);
+    let language = parse_language(&args).unwrap_or(Language::Zhs);
+    let nibbit_count = parse_nibbit_count(&args).unwrap_or(DEFAULT_NIBBIT_COUNT);
 
     let registry = StaticRegistry::standard();
-    let mut app = TuiApp::new(LocalCombatDriver::new(registry, seed), language);
-    let mut renderer: Box<dyn CombatRenderer> = if plain {
-        Box::new(PlainRenderer)
-    } else {
-        Box::new(AnsiRenderer)
-    };
+    let driver = LocalCombatDriver::new(registry, seed, nibbit_count);
 
-    if let Err(error) = app.run(&mut *renderer) {
-        eprintln!("tui error: {error}");
+    if profile.use_plain_renderer() {
+        let mut app = TuiApp::new(driver, language);
+        let mut renderer = PlainRenderer;
+        if let Err(error) = app.run(&mut renderer) {
+            eprintln!("tui error: {error}");
+        }
+    } else {
+        let mut app = ratatui_renderer::RatatuiCombatApp::new(driver, language, profile);
+        if let Err(error) = app.run() {
+            eprintln!("tui error: {error}");
+        }
     }
 }
 
@@ -50,10 +62,11 @@ fn parse_language(args: &[String]) -> Option<Language> {
         .and_then(Language::from_code)
 }
 
-fn should_fallback_to_plain() -> bool {
-    std::env::var("TERM")
-        .map(|term| term == "dumb")
-        .unwrap_or(false)
+fn parse_nibbit_count(args: &[String]) -> Option<usize> {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("--nibbits="))
+        .and_then(|value| value.parse().ok())
+        .filter(|count| *count > 0)
 }
 
 struct TuiApp<D> {
@@ -205,23 +218,25 @@ struct LocalCombatDriver {
     registry: StaticRegistry,
     engine: Engine,
     seed: u64,
+    nibbit_count: usize,
     log_sink: Option<StepLogSink>,
 }
 
 impl LocalCombatDriver {
-    fn new(registry: StaticRegistry, seed: u64) -> Self {
-        let engine = build_test_engine(&registry, seed);
+    fn new(registry: StaticRegistry, seed: u64, nibbit_count: usize) -> Self {
+        let engine = build_test_engine(&registry, seed, nibbit_count);
         Self {
             registry,
             engine,
             seed,
+            nibbit_count,
             log_sink: create_log_sink("tui"),
         }
     }
 
     fn restart(&mut self) {
         self.seed = self.seed.wrapping_add(1);
-        self.engine = build_test_engine(&self.registry, self.seed);
+        self.engine = build_test_engine(&self.registry, self.seed, self.nibbit_count);
         self.record_note("restart", &format!("seed: {}", self.seed));
     }
 
@@ -310,7 +325,7 @@ fn create_log_sink(session: &str) -> Option<StepLogSink> {
     }
 }
 
-fn build_test_engine(registry: &StaticRegistry, seed: u64) -> Engine {
+fn build_test_engine(registry: &StaticRegistry, seed: u64, nibbit_count: usize) -> Engine {
     let deck = random_test_deck(registry, seed, TEST_DECK_SIZE);
     let monster = registry
         .monsters
@@ -323,10 +338,11 @@ fn build_test_engine(registry: &StaticRegistry, seed: u64) -> Engine {
             model: None,
             max_hp: 42,
         });
+    let monsters = std::iter::repeat(monster).take(nibbit_count.max(1));
     let state = GameState::single_player_test_combat(
         seed,
         deck,
-        [monster],
+        monsters,
         PLAYER_MAX_HP,
         PLAYER_MAX_ENERGY,
         BASE_HAND_DRAW_COUNT,
@@ -491,20 +507,6 @@ trait CombatRenderer {
     ) -> io::Result<()>;
 }
 
-struct AnsiRenderer;
-
-impl CombatRenderer for AnsiRenderer {
-    fn render(
-        &mut self,
-        snapshot: &CombatSnapshot,
-        messages: &VecDeque<String>,
-        loc: &Localization,
-    ) -> io::Result<()> {
-        print!("\x1b[2J\x1b[H");
-        render_snapshot(snapshot, messages, loc)
-    }
-}
-
 struct PlainRenderer;
 
 impl CombatRenderer for PlainRenderer {
@@ -533,21 +535,33 @@ fn render_snapshot(
         loc.phase(snapshot.phase),
         loc.language().code()
     );
+    let star_suffix = if snapshot.stars > 0 {
+        format!("  {} {}", loc.ui("label.stars"), snapshot.stars)
+    } else {
+        String::new()
+    };
     println!(
-        "{}: {} {}/{}  {} {}  {} {}/{}  {} {}/{}",
+        "{}: {} {}/{}{}  {} {}/{}{}  {} {}/{}",
         loc.ui("label.player"),
         loc.ui("label.hp"),
         snapshot.player.hp,
         snapshot.player.max_hp,
-        loc.ui("label.block"),
-        snapshot.player.block,
+        block_suffix(snapshot.player.block, loc),
         loc.ui("label.energy"),
         snapshot.energy,
         snapshot.max_energy,
+        star_suffix,
         loc.ui("label.hand"),
         snapshot.hand.len(),
         MAX_CARDS_IN_HAND
     );
+    if !snapshot.player.powers.is_empty() {
+        println!(
+            "{}: {}",
+            loc.ui("label.status"),
+            format_power_list(&snapshot.player.powers)
+        );
+    }
     println!(
         "{}: {} {}  {} {}  {} {}  {} {}",
         loc.ui("label.piles"),
@@ -569,18 +583,24 @@ fn render_snapshot(
             format!("  {}", loc.ui("label.dead"))
         };
         println!(
-            "  {}. {}  {} {}/{}  {} {}  {} {}{}",
+            "  {}. {}  {} {}/{}{}  {} {}{}",
             index + 1,
             monster.label,
             loc.ui("label.hp"),
             monster.hp,
             monster.max_hp,
-            loc.ui("label.block"),
-            monster.block,
+            block_suffix(monster.block, loc),
             loc.ui("label.intent"),
             monster.intent,
             dead_suffix
         );
+        if !monster.powers.is_empty() {
+            println!(
+                "     {}: {}",
+                loc.ui("label.status"),
+                format_power_list(&monster.powers)
+            );
+        }
     }
     if snapshot.monsters.is_empty() {
         println!("  {}", loc.ui("label.none"));
@@ -589,14 +609,11 @@ fn render_snapshot(
     println!("{}:", loc.ui("label.hand"));
     for (index, card) in snapshot.hand.iter().enumerate() {
         println!(
-            "  {}. {}  {:<8} {} {:<8} {} {}",
+            "  {}. {:<8} {}  {}",
             index + 1,
-            pad_display(&card.label, 28),
-            card.card_type,
-            loc.ui("label.cost"),
             card.cost,
-            loc.ui("label.target"),
-            card.target
+            pad_display(&card.label, 28),
+            card.card_type
         );
     }
     if snapshot.hand.is_empty() {
@@ -616,6 +633,14 @@ fn pad_display(value: &str, min_width: usize) -> String {
         value.to_string()
     } else {
         format!("{value}{}", " ".repeat(min_width - width))
+    }
+}
+
+fn block_suffix(block: i32, loc: &Localization) -> String {
+    if block > 0 {
+        format!("  {} {}", loc.ui("label.block"), block)
+    } else {
+        String::new()
     }
 }
 
@@ -649,6 +674,7 @@ struct CombatSnapshot {
     player: CreatureView,
     energy: i32,
     max_energy: i32,
+    stars: i32,
     draw_count: usize,
     discard_count: usize,
     exhaust_count: usize,
@@ -665,7 +691,7 @@ impl CombatSnapshot {
             .unwrap_or(CombatPhase::CombatStart);
         let player_creature = combat
             .and_then(|combat| engine.state.creature(combat.player.creature))
-            .map(|creature| CreatureView::from_creature(creature, loc))
+            .map(|creature| CreatureView::from_creature(engine, creature, loc))
             .unwrap_or_else(|| CreatureView::placeholder(loc.ui("entity.player"), loc));
 
         let monsters = combat
@@ -702,6 +728,7 @@ impl CombatSnapshot {
             max_energy: combat
                 .map(|combat| combat.player.max_energy)
                 .unwrap_or_default(),
+            stars: combat.map(|combat| combat.player.stars).unwrap_or_default(),
             draw_count: pile_count(combat, PileKind::Draw),
             discard_count: pile_count(combat, PileKind::Discard),
             exhaust_count: pile_count(combat, PileKind::Exhaust),
@@ -725,6 +752,7 @@ struct CreatureView {
     max_hp: i32,
     block: i32,
     intent: String,
+    powers: Vec<PowerView>,
     alive: bool,
 }
 
@@ -736,17 +764,23 @@ impl CreatureView {
             max_hp: 0,
             block: 0,
             intent: loc.ui("label.unknown").to_string(),
+            powers: Vec::new(),
             alive: false,
         }
     }
 
-    fn from_creature(creature: &crate::core::state::Creature, loc: &Localization) -> Self {
+    fn from_creature(
+        engine: &Engine,
+        creature: &crate::core::state::Creature,
+        loc: &Localization,
+    ) -> Self {
         Self {
             label: loc.ui("entity.player").to_string(),
             hp: creature.hp,
             max_hp: creature.max_hp,
             block: creature.block,
             intent: loc.ui("label.none").to_string(),
+            powers: power_views(engine, creature.id, loc),
             alive: creature.alive,
         }
     }
@@ -766,8 +800,58 @@ impl CreatureView {
             max_hp: creature.max_hp,
             block: creature.block,
             intent: monster_intent_label(engine, id, loc),
+            powers: power_views(engine, creature.id, loc),
             alive: creature.alive,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PowerView {
+    label: String,
+    amount: i32,
+}
+
+fn power_views(engine: &Engine, owner: CreatureId, loc: &Localization) -> Vec<PowerView> {
+    let Some(combat) = engine.state.combat() else {
+        return Vec::new();
+    };
+    let Some(creature) = engine.state.creature(owner) else {
+        return Vec::new();
+    };
+
+    creature
+        .powers
+        .iter()
+        .filter_map(|power_id| combat.powers.get(power_id))
+        .map(|instance| {
+            let label = engine
+                .registry
+                .powers
+                .get(instance.def)
+                .map(|def| loc.entity_name(def.loc_key))
+                .unwrap_or_else(|| instance.def.as_str().to_string());
+            PowerView {
+                label,
+                amount: instance.amount,
+            }
+        })
+        .collect()
+}
+
+fn format_power_list(powers: &[PowerView]) -> String {
+    powers
+        .iter()
+        .map(format_power)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_power(power: &PowerView) -> String {
+    if power.amount == 1 {
+        power.label.clone()
+    } else {
+        format!("{} {}", power.label, power.amount)
     }
 }
 
@@ -776,7 +860,8 @@ struct CardView {
     label: String,
     card_type: String,
     cost: String,
-    target: String,
+    costs: CardCosts,
+    target: TargetType,
 }
 
 impl CardView {
@@ -786,10 +871,12 @@ impl CardView {
                 label: format!("{:?}", id),
                 card_type: loc.ui("label.unknown").to_string(),
                 cost: "?".to_string(),
-                target: "?".to_string(),
+                costs: CardCosts::default(),
+                target: TargetType::None,
             };
         };
         let def = engine.registry.cards.get(card.def);
+        let costs = card.effective_costs();
         Self {
             label: def
                 .map(|def| loc.entity_name(def.loc_key))
@@ -797,11 +884,30 @@ impl CardView {
             card_type: def
                 .map(|def| loc.card_type(def.card_type).to_string())
                 .unwrap_or_else(|| loc.ui("label.unknown").to_string()),
-            cost: cost_label(card.effective_costs(), loc),
-            target: def
-                .map(|def| loc.target_type(def.target).to_string())
-                .unwrap_or_else(|| loc.ui("label.unknown").to_string()),
+            cost: cost_label(costs, loc),
+            costs,
+            target: def.map(|def| def.target).unwrap_or(TargetType::None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_nibbit_test_combat_builds_three_monsters() {
+        let registry = StaticRegistry::standard();
+        let engine = build_test_engine(&registry, 7, 3);
+        let loc = Localization::new(Language::Eng);
+        let snapshot = CombatSnapshot::from_engine(&engine, &loc);
+
+        assert_eq!(snapshot.monsters.len(), 3);
+        assert!(snapshot.monsters.iter().all(|monster| monster.alive));
+        assert!(snapshot
+            .monsters
+            .iter()
+            .all(|monster| monster.label == "Nibbit"));
     }
 }
 
