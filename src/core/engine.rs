@@ -383,6 +383,35 @@ mod tests {
     }
 
     #[test]
+    fn card_body_resolves_before_card_played_event() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(131));
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.combat().unwrap().monster_ids()[0];
+        let bash = add_card_to_hand(&mut engine, BASH, false);
+
+        let StepResult::Done(log) = engine.step(Command::PlayCard {
+            player,
+            card: bash,
+            target: Some(enemy),
+        }) else {
+            panic!("bash should resolve");
+        };
+
+        let damage_index = log
+            .iter()
+            .position(|entry| {
+                matches!(entry, LogEntry::StateChanged(StateChange::DamageApplied(_)))
+            })
+            .expect("damage is logged");
+        let played_index = log
+            .iter()
+            .position(|entry| matches!(entry, LogEntry::EventTriggered(Event::CardPlayed(_))))
+            .expect("card played is logged");
+
+        assert!(damage_index < played_index);
+    }
+
+    #[test]
     fn pommel_strike_damages_nibbit_and_draws_card() {
         let mut engine = Engine::new(GameState::full_nibbit_combat(32));
         let player = engine.state.player_id().unwrap();

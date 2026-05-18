@@ -219,7 +219,7 @@ impl EffectResolver {
                         (def.play)(&ctx, card, target)
                     })
                     .unwrap_or_default();
-                ApplyResult::Continue(effects)
+                self.apply_immediate_effects(state, registry, effects)
             }
             Effect::DealDamage(op) => self.apply_damage(state, registry, op),
             Effect::DealDamageToAllEnemies(op) => {
@@ -314,6 +314,31 @@ impl EffectResolver {
                 }
                 Err(error) => ApplyResult::StateError(error),
             },
+            Effect::GainMaxHpIfFatal {
+                target,
+                beneficiary,
+                amount,
+                source: _,
+            } => {
+                let fatal = state
+                    .creature(target)
+                    .map(|creature| creature.hp <= 0)
+                    .unwrap_or(false);
+                if !fatal {
+                    return ApplyResult::Continue(Vec::new());
+                }
+                match state.gain_max_hp(beneficiary, amount) {
+                    Ok(actual) => {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::MaxHpGained {
+                                target: beneficiary,
+                                amount: actual,
+                            }));
+                        ApplyResult::Continue(Vec::new())
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
+            }
             Effect::GainBlock {
                 target,
                 amount,
@@ -499,6 +524,22 @@ impl EffectResolver {
                         .collect(),
                 )
             }
+            Effect::AddCardCounter {
+                card,
+                counter,
+                amount,
+            } => match state.add_card_counter(card, counter, amount) {
+                Ok(value) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::CardCounterChanged {
+                            card,
+                            counter,
+                            value,
+                        }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
             Effect::AddGeneratedCard {
                 player,
                 def,
@@ -1048,10 +1089,7 @@ impl EffectResolver {
             .get(card_state.def)
             .map(|def| def.costs_for(card_state.upgraded))
             .unwrap_or(card_state.costs);
-        let costs = crate::core::state::CardCosts {
-            energy: card_state.temp_costs.energy.unwrap_or(def_costs.energy),
-            stars: card_state.temp_costs.stars.unwrap_or(def_costs.stars),
-        };
+        let costs = card_state.costs_with_temporary(def_costs);
 
         Ok(CardPayment {
             energy: self.resolve_resource_cost(

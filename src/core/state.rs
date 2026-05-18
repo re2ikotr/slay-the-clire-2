@@ -127,6 +127,11 @@ pub struct CardFlags {
     pub zero_cost_this_turn: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CardCounter {
+    DamageIncrease,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardInstance {
     pub id: CardInstanceId,
@@ -137,13 +142,29 @@ pub struct CardInstance {
     pub temp_costs: TemporaryCardCosts,
     pub pile: PileId,
     pub flags: CardFlags,
+    pub counters: BTreeMap<CardCounter, i32>,
 }
 
 impl CardInstance {
     pub fn effective_costs(&self) -> CardCosts {
+        self.costs_with_temporary(self.costs)
+    }
+
+    pub fn costs_with_temporary(&self, base_costs: CardCosts) -> CardCosts {
         CardCosts {
-            energy: self.temp_costs.energy.unwrap_or(self.costs.energy),
-            stars: self.temp_costs.stars.unwrap_or(self.costs.stars),
+            energy: self.temp_costs.energy.unwrap_or(base_costs.energy),
+            stars: self.temp_costs.stars.unwrap_or(base_costs.stars),
+        }
+    }
+
+    pub fn counter(&self, counter: CardCounter) -> i32 {
+        self.counters.get(&counter).copied().unwrap_or(0)
+    }
+
+    fn clear_turn_limited_state(&mut self) {
+        if self.flags.zero_cost_this_turn {
+            self.temp_costs.energy = None;
+            self.flags.zero_cost_this_turn = false;
         }
     }
 }
@@ -414,6 +435,7 @@ impl GameState {
                     temp_costs: TemporaryCardCosts::default(),
                     pile: draw,
                     flags: CardFlags::default(),
+                    counters: BTreeMap::new(),
                 },
             );
             draw_cards.push(id);
@@ -500,6 +522,7 @@ impl GameState {
                 temp_costs: TemporaryCardCosts::default(),
                 pile: hand,
                 flags: CardFlags::default(),
+                counters: BTreeMap::new(),
             },
         );
 
@@ -557,6 +580,7 @@ impl GameState {
                 temp_costs: TemporaryCardCosts::default(),
                 pile: hand,
                 flags: CardFlags::default(),
+                counters: BTreeMap::new(),
             },
         );
         cards.insert(
@@ -570,6 +594,7 @@ impl GameState {
                 temp_costs: TemporaryCardCosts::default(),
                 pile: hand,
                 flags: CardFlags::default(),
+                counters: BTreeMap::new(),
             },
         );
 
@@ -641,6 +666,7 @@ impl GameState {
                     temp_costs: TemporaryCardCosts::default(),
                     pile: draw,
                     flags: CardFlags::default(),
+                    counters: BTreeMap::new(),
                 },
             );
             draw_cards.push(id);
@@ -912,6 +938,9 @@ impl GameState {
 
         if let Some(card_state) = combat.cards.get_mut(&card) {
             card_state.pile = to;
+            if !matches!(to.kind, PileKind::Hand) {
+                card_state.clear_turn_limited_state();
+            }
         }
 
         Ok(from)
@@ -955,6 +984,7 @@ impl GameState {
                     zero_cost_this_turn,
                     ..CardFlags::default()
                 },
+                counters: BTreeMap::new(),
             },
         );
         combat.player.piles.push(to.kind, id);
@@ -973,6 +1003,18 @@ impl GameState {
         }
         card.upgraded = true;
         Ok(true)
+    }
+
+    pub fn add_card_counter(
+        &mut self,
+        card: CardInstanceId,
+        counter: CardCounter,
+        amount: i32,
+    ) -> Result<i32, StateError> {
+        let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
+        let value = card.counters.entry(counter).or_insert(0);
+        *value += amount;
+        Ok(*value)
     }
 
     pub fn shuffle_discard_into_draw_if_needed(

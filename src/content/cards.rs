@@ -7,9 +7,12 @@ use crate::core::effect::{
 };
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey};
-use crate::core::query::{BlockCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc};
-use crate::core::rules::RuleCtx;
-use crate::core::state::{CardCosts, GameState, PileId, PileKind, ResourceKind};
+use crate::core::query::{
+    BlockCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
+    ResourceCostCalc,
+};
+use crate::core::rules::{prevent_by_current_listener, RuleCtx};
+use crate::core::state::{CardCosts, CardCounter, GameState, PileId, PileKind, ResourceKind};
 use crate::registry::{DefRegistry, StaticRegistry};
 
 pub type CardPlayFn =
@@ -104,6 +107,10 @@ pub enum CardKeyword {
     Exhaust,
     Innate,
     Unplayable,
+    Ethereal,
+    Temporary,
+    PurgeOnUse,
+    FreeThisTurn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +157,7 @@ impl CardSpec {
             tags: self.tags,
             can_generate_in_combat: self.can_generate_in_combat,
             play: self.play,
-            rules: CardRules::default(),
+            rules: card_rules_for(self.id),
         }
     }
 }
@@ -1461,6 +1468,35 @@ pub fn no_card_effect(
     Vec::new()
 }
 
+fn card_rules_for(id: CardId) -> CardRules {
+    match id {
+        PACTS_END => CardRules {
+            decide: Some(pacts_end_decide),
+            ..CardRules::default()
+        },
+        _ => CardRules::default(),
+    }
+}
+
+fn pacts_end_decide(ctx: &RuleCtx<'_>, card: CardInstanceId, query: &DecisionQuery) -> Decision {
+    let DecisionQueryKind::ShouldPlay { card: played, .. } = query.kind else {
+        return Decision::Allow;
+    };
+    if played != card {
+        return Decision::Allow;
+    }
+    let exhausted = ctx
+        .state
+        .combat()
+        .map(|combat| combat.player.piles.exhaust.len())
+        .unwrap_or_default();
+    if exhausted >= 3 {
+        Decision::Allow
+    } else {
+        prevent_by_current_listener(ctx, PreventReason::CannotPlay)
+    }
+}
+
 macro_rules! simple_attack {
     ($fn_name:ident, $base:expr, $upgrade_delta:expr) => {
         fn $fn_name(
@@ -1933,24 +1969,17 @@ fn feed_play(
     card: CardInstanceId,
     target: Option<CreatureId>,
 ) -> Vec<Effect> {
-    // Fatal max HP is resolved optimistically after damage; CheckDeaths will settle combat state.
     let Some(target) = target else {
         return Vec::new();
     };
     let mut effects = attack_effects(ctx, card, target, value(ctx, card, 10, 2), 1);
-    if ctx
-        .state
-        .creature(target)
-        .map(|c| c.hp <= value(ctx, card, 10, 2))
-        .unwrap_or(false)
-    {
-        if let Some(player) = ctx.state.player_creature_id() {
-            effects.push(Effect::GainMaxHp {
-                target: player,
-                amount: value(ctx, card, 3, 1),
-                source: Some(Source::Card(card)),
-            });
-        }
+    if let Some(player) = ctx.state.player_creature_id() {
+        effects.push(Effect::GainMaxHpIfFatal {
+            target,
+            beneficiary: player,
+            amount: value(ctx, card, 3, 1),
+            source: Some(Source::Card(card)),
+        });
     }
     effects
 }
@@ -2332,7 +2361,20 @@ fn rampage_play(
     card: CardInstanceId,
     target: Option<CreatureId>,
 ) -> Vec<Effect> {
-    strike_like(ctx, card, target, 9, 0, 1)
+    let bonus = ctx
+        .state
+        .card(card)
+        .map(|card| card.counter(CardCounter::DamageIncrease))
+        .unwrap_or(0);
+    let mut effects = target
+        .map(|target| attack_effects(ctx, card, target, 9 + bonus, 1))
+        .unwrap_or_default();
+    effects.push(Effect::AddCardCounter {
+        card,
+        counter: CardCounter::DamageIncrease,
+        amount: if is_upgraded(ctx, card) { 9 } else { 5 },
+    });
+    effects
 }
 
 fn rupture_play(ctx: &CardPlayCtx<'_>, card: CardInstanceId, _: Option<CreatureId>) -> Vec<Effect> {
@@ -2836,6 +2878,9 @@ fn count_all_tag(ctx: &CardPlayCtx<'_>, tag: CardTag) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::engine::{Engine, StepResult};
+    use crate::core::state::{CardCounter, CombatSetupCard, CombatSetupMonster};
+    use crate::core::Command;
 
     #[test]
     fn ironclad_pool_matches_sts2_source_count() {
@@ -2869,5 +2914,115 @@ mod tests {
             whirlwind.costs_for(false).energy,
             crate::core::state::CardCost::X
         );
+    }
+
+    #[test]
+    fn rampage_increases_its_own_instance_damage_after_play() {
+        let registry = StaticRegistry::standard();
+        let state = GameState::single_player_test_combat(
+            1,
+            [CombatSetupCard {
+                def: RAMPAGE,
+                upgraded: false,
+                costs: CardCosts::energy(1),
+            }],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 30,
+            }],
+            80,
+            3,
+            1,
+        );
+        let mut engine = Engine::with_registry(state, registry);
+        let combat = engine.state.combat().unwrap();
+        let player = combat.player.id;
+        let card = combat.player.piles.hand[0];
+        let target = engine.state.alive_monster_ids()[0];
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: Some(target),
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(
+            engine
+                .state
+                .card(card)
+                .unwrap()
+                .counter(CardCounter::DamageIncrease),
+            5
+        );
+    }
+
+    #[test]
+    fn pacts_end_requires_three_exhausted_cards() {
+        let registry = StaticRegistry::standard();
+        let state = GameState::single_player_test_combat(
+            1,
+            [CombatSetupCard {
+                def: PACTS_END,
+                upgraded: false,
+                costs: CardCosts::energy(0),
+            }],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 30,
+            }],
+            80,
+            3,
+            1,
+        );
+        let mut engine = Engine::with_registry(state, registry);
+        let combat = engine.state.combat().unwrap();
+        let player = combat.player.id;
+        let card = combat.player.piles.hand[0];
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: None,
+        });
+
+        assert!(matches!(result, StepResult::Rejected(_, _)));
+    }
+
+    #[test]
+    fn feed_gains_max_hp_only_after_actual_fatal_damage() {
+        let registry = StaticRegistry::standard();
+        let state = GameState::single_player_test_combat(
+            1,
+            [CombatSetupCard {
+                def: FEED,
+                upgraded: false,
+                costs: CardCosts::energy(1),
+            }],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 10,
+            }],
+            80,
+            3,
+            1,
+        );
+        let mut engine = Engine::with_registry(state, registry);
+        let combat = engine.state.combat().unwrap();
+        let player = combat.player.id;
+        let player_creature = combat.player.creature;
+        let card = combat.player.piles.hand[0];
+        let target = engine.state.alive_monster_ids()[0];
+        engine.state.creature_mut(target).unwrap().block = 10;
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: Some(target),
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(engine.state.creature(player_creature).unwrap().max_hp, 80);
+        assert_eq!(engine.state.creature(target).unwrap().hp, 10);
     }
 }

@@ -1,4 +1,5 @@
-use crate::content::cards::{CardType, TargetType};
+use crate::content::card_text::CardTextLine;
+use crate::content::cards::{CardKeyword, CardType, TargetType};
 use crate::content::monsters::MonsterIntent;
 use crate::core::ids::LocKey;
 use crate::core::state::{CardCost, CombatPhase};
@@ -124,6 +125,32 @@ impl Localization {
             CardCost::Fixed(value) => value.to_string(),
             CardCost::X => "X".to_string(),
             CardCost::Unplayable => self.ui("cost.unplayable").to_string(),
+        }
+    }
+
+    pub fn card_keyword(self, keyword: CardKeyword) -> &'static str {
+        match (self.language, keyword) {
+            (Language::Eng, CardKeyword::Exhaust) => "Exhaust",
+            (Language::Eng, CardKeyword::Innate) => "Innate",
+            (Language::Eng, CardKeyword::Unplayable) => "Unplayable",
+            (Language::Eng, CardKeyword::Ethereal) => "Ethereal",
+            (Language::Eng, CardKeyword::Temporary) => "Temporary",
+            (Language::Eng, CardKeyword::PurgeOnUse) => "Purge",
+            (Language::Eng, CardKeyword::FreeThisTurn) => "Free this turn",
+            (Language::Zhs, CardKeyword::Exhaust) => "消耗",
+            (Language::Zhs, CardKeyword::Innate) => "固有",
+            (Language::Zhs, CardKeyword::Unplayable) => "不能打出",
+            (Language::Zhs, CardKeyword::Ethereal) => "虚无",
+            (Language::Zhs, CardKeyword::Temporary) => "临时",
+            (Language::Zhs, CardKeyword::PurgeOnUse) => "使用后移除",
+            (Language::Zhs, CardKeyword::FreeThisTurn) => "本回合免费",
+        }
+    }
+
+    pub fn card_text_line(self, line: &CardTextLine) -> String {
+        match self.language {
+            Language::Eng => line.eng.clone(),
+            Language::Zhs => line.zhs.clone(),
         }
     }
 

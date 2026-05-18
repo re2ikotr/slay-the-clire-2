@@ -3,7 +3,7 @@ use crate::core::engine::CombatResult;
 use crate::core::event::Event;
 use crate::core::ids::{CardInstanceId, CreatureId, PlayerId, PowerInstanceId};
 use crate::core::query::{Decision, ModifierLog};
-use crate::core::state::{PileId, ResourceKind, StateError};
+use crate::core::state::{CardCounter, PileId, ResourceKind, StateError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogEntry {
@@ -59,6 +59,11 @@ pub enum StateChange {
     },
     CardUpgraded {
         card: CardInstanceId,
+    },
+    CardCounterChanged {
+        card: CardInstanceId,
+        counter: CardCounter,
+        value: i32,
     },
     CardsShuffled {
         player: PlayerId,

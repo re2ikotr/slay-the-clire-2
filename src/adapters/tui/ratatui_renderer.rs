@@ -636,9 +636,16 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
     }
 
     fn hand_lines(&self, snapshot: &CombatSnapshot) -> Vec<Line<'static>> {
+        let selected_target =
+            match EnemyTargetPreview::for_card(snapshot, self.selected_card, self.selected_monster)
+            {
+                EnemyTargetPreview::Single(index) => Some(index),
+                EnemyTargetPreview::None | EnemyTargetPreview::All => None,
+            };
         card_list_lines(
             &snapshot.hand,
             Some(self.selected_card),
+            selected_target,
             self.focus == Focus::Monsters,
             self.symbols,
             self.loc,
@@ -651,6 +658,7 @@ impl<D: CombatDriver> RatatuiCombatApp<D> {
     fn pile_card_lines(&self, cards: &[super::CardView]) -> Vec<Line<'static>> {
         card_list_lines(
             cards,
+            None,
             None,
             false,
             self.symbols,
@@ -1114,6 +1122,7 @@ fn latest_visible_lines(lines: Vec<Line<'static>>, visible_height: u16) -> Vec<L
 fn card_list_lines(
     cards: &[super::CardView],
     selected_card: Option<usize>,
+    selected_target: Option<usize>,
     pulse_selected_marker: bool,
     symbols: Symbols,
     loc: Localization,
@@ -1131,7 +1140,7 @@ fn card_list_lines(
     cards
         .iter()
         .enumerate()
-        .map(|(index, card)| {
+        .flat_map(|(index, card)| {
             let selected = selected_card == Some(index);
             let marker = if selected {
                 symbols.get(UiSymbol::Prompt)
@@ -1163,7 +1172,26 @@ fn card_list_lines(
                 Span::raw("  "),
                 Span::styled(card.card_type.clone(), line_style),
             ]);
-            Line::from(spans)
+            if !card.keywords.is_empty() {
+                spans.extend([
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("[{}]", card.keywords.join(", ")),
+                        theme.style(UiRole::LogWarning),
+                    ),
+                ]);
+            }
+
+            let mut lines = vec![Line::from(spans)];
+            if selected || selected_card.is_none() {
+                for description in card.description_for_target(selected_target) {
+                    lines.push(Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(description.clone(), theme.style(UiRole::Muted)),
+                    ]));
+                }
+            }
+            lines
         })
         .collect()
 }
@@ -1392,6 +1420,9 @@ mod tests {
             cost: "1".to_string(),
             costs: CardCosts::default(),
             target,
+            keywords: Vec::new(),
+            description: Vec::new(),
+            target_descriptions: Vec::new(),
         }
     }
 }

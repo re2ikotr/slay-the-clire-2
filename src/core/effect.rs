@@ -6,7 +6,7 @@ use crate::core::ids::{
     CardId, CardInstanceId, ChoiceId, CreatureId, LocKey, PlayerId, PotionInstanceId, PowerId,
     PowerInstanceId, RelicInstanceId,
 };
-use crate::core::state::{CombatPhase, PileId, ResourceKind, Side};
+use crate::core::state::{CardCounter, CombatPhase, PileId, ResourceKind, Side};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -50,6 +50,12 @@ pub enum Effect {
     },
     GainMaxHp {
         target: CreatureId,
+        amount: i32,
+        source: Option<Source>,
+    },
+    GainMaxHpIfFatal {
+        target: CreatureId,
+        beneficiary: CreatureId,
         amount: i32,
         source: Option<Source>,
     },
@@ -102,6 +108,11 @@ pub enum Effect {
     UpgradeHand {
         player: PlayerId,
         mode: UpgradeMode,
+    },
+    AddCardCounter {
+        card: CardInstanceId,
+        counter: CardCounter,
+        amount: i32,
     },
     AddGeneratedCard {
         player: PlayerId,

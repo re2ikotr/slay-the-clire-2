@@ -9,6 +9,7 @@ mod theme;
 
 use crate::adapters::log_store::StepLogSink;
 use crate::assets::{Language, Localization};
+use crate::content::card_text::{describe_card, display_costs, CardTextCtx, CardTextScope};
 use crate::content::cards::TargetType;
 use crate::content::monsters::NIBBIT;
 use crate::core::ids::{CardInstanceId, CreatureId};
@@ -608,13 +609,22 @@ fn render_snapshot(
         MAX_CARDS_IN_HAND
     );
     for (index, card) in snapshot.hand.iter().enumerate() {
+        let keywords = if card.keywords.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", card.keywords.join(", "))
+        };
         println!(
-            "  {}. {:<8} {}  {}",
+            "  {}. {:<8} {}  {}{}",
             index + 1,
             card.cost,
             pad_display(&card.label, 28),
-            card.card_type
+            card.card_type,
+            keywords
         );
+        for line in &card.description {
+            println!("      {line}");
+        }
     }
     if snapshot.hand.is_empty() {
         println!("  {}", loc.ui("label.empty"));
@@ -693,17 +703,23 @@ impl CombatSnapshot {
             .map(|creature| CreatureView::from_creature(engine, creature, loc))
             .unwrap_or_else(|| CreatureView::placeholder(loc.ui("entity.player"), loc));
 
-        let monsters = combat
+        let visible_monster_ids = combat
             .map(|combat| {
                 combat
                     .creatures
                     .iter()
                     .filter(|creature| creature.side == Side::Monsters)
                     .filter(|creature| monster_is_visible_in_snapshot(engine, creature))
-                    .map(|creature| CreatureView::from_monster(engine, creature.id, loc))
+                    .map(|creature| creature.id)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+
+        let monsters = visible_monster_ids
+            .iter()
+            .copied()
+            .map(|creature| CreatureView::from_monster(engine, creature, loc))
+            .collect::<Vec<_>>();
 
         let hand = combat
             .map(|combat| {
@@ -713,7 +729,7 @@ impl CombatSnapshot {
                     .hand
                     .iter()
                     .copied()
-                    .map(|card| CardView::from_card(engine, card, loc))
+                    .map(|card| CardView::from_card(engine, card, loc, Some(&visible_monster_ids)))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -752,7 +768,7 @@ fn pile_cards(
                 .pile(pile)
                 .iter()
                 .copied()
-                .map(|card| CardView::from_card(engine, card, loc))
+                .map(|card| CardView::from_card(engine, card, loc, None))
                 .collect()
         })
         .unwrap_or_default()
@@ -888,10 +904,18 @@ struct CardView {
     cost: String,
     costs: CardCosts,
     target: TargetType,
+    keywords: Vec<String>,
+    description: Vec<String>,
+    target_descriptions: Vec<Vec<String>>,
 }
 
 impl CardView {
-    fn from_card(engine: &Engine, id: CardInstanceId, loc: &Localization) -> Self {
+    fn from_card(
+        engine: &Engine,
+        id: CardInstanceId,
+        loc: &Localization,
+        preview_targets: Option<&[CreatureId]>,
+    ) -> Self {
         let Some(card) = engine.state.card(id) else {
             return Self {
                 label: format!("{:?}", id),
@@ -899,21 +923,82 @@ impl CardView {
                 cost: "?".to_string(),
                 costs: CardCosts::default(),
                 target: TargetType::None,
+                keywords: Vec::new(),
+                description: Vec::new(),
+                target_descriptions: Vec::new(),
             };
         };
         let def = engine.registry.cards.get(card.def);
-        let costs = card.effective_costs();
+        let scope = if card.pile.kind == PileKind::Hand {
+            CardTextScope::Hand
+        } else {
+            CardTextScope::Pile
+        };
+        let text_ctx = CardTextCtx {
+            state: &engine.state,
+            registry: &engine.registry,
+            target: preview_targets.and_then(|targets| targets.first().copied()),
+            scope,
+        };
+        let text = describe_card(&text_ctx, id);
+        let costs = display_costs(&text_ctx, id);
+        let base_label = def
+            .map(|def| loc.entity_name(def.loc_key))
+            .unwrap_or_else(|| card.def.as_str().to_string());
+        let label = if card.upgraded {
+            format!("{base_label}+")
+        } else {
+            base_label
+        };
+        let target_descriptions = preview_targets
+            .map(|targets| {
+                targets
+                    .iter()
+                    .copied()
+                    .map(|target| {
+                        let ctx = CardTextCtx {
+                            state: &engine.state,
+                            registry: &engine.registry,
+                            target: Some(target),
+                            scope,
+                        };
+                        describe_card(&ctx, id)
+                            .lines
+                            .iter()
+                            .map(|line| loc.card_text_line(line))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Self {
-            label: def
-                .map(|def| loc.entity_name(def.loc_key))
-                .unwrap_or_else(|| card.def.as_str().to_string()),
+            label,
             card_type: def
                 .map(|def| loc.card_type(def.card_type).to_string())
                 .unwrap_or_else(|| loc.ui("label.unknown").to_string()),
             cost: cost_label(costs, loc),
             costs,
             target: def.map(|def| def.target).unwrap_or(TargetType::None),
+            keywords: text
+                .keywords
+                .iter()
+                .map(|keyword| loc.card_keyword(*keyword).to_string())
+                .collect(),
+            description: text
+                .lines
+                .iter()
+                .map(|line| loc.card_text_line(line))
+                .collect(),
+            target_descriptions,
         }
+    }
+
+    fn description_for_target(&self, target_index: Option<usize>) -> &[String] {
+        target_index
+            .and_then(|index| self.target_descriptions.get(index))
+            .filter(|lines| !lines.is_empty())
+            .map(Vec::as_slice)
+            .unwrap_or(&self.description)
     }
 }
 
