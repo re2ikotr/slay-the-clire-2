@@ -1,8 +1,15 @@
 use rust_decimal::Decimal;
 
+use crate::content::cards::CardRules;
+use crate::content::monsters::MonsterRules;
+use crate::content::potions::PotionRules;
+use crate::content::powers::PowerRules;
+use crate::content::relics::RelicRules;
 use crate::core::effect::{Effect, Source};
 use crate::core::event::Event;
-use crate::core::ids::{CardInstanceId, CreatureId, PlayerId};
+use crate::core::ids::{
+    CardInstanceId, CreatureId, PlayerId, PotionInstanceId, PowerInstanceId, RelicInstanceId,
+};
 use crate::core::listener::{collect_combat_listeners, ListenerRef, ListenerScope};
 use crate::core::query::{
     BlockCalc, CardPlayResultPileCalc, CardPlayResultPileModifierLog, DamageCalc, Decision,
@@ -278,43 +285,9 @@ fn dispatch_event(
     ctx: &RuleCtx<'_>,
     event: &Event,
 ) -> Vec<Effect> {
-    match listener {
-        ListenerRef::Power(id) => state
-            .combat()
-            .and_then(|combat| combat.powers.get(&id))
-            .and_then(|instance| registry.powers.get(instance.def))
-            .and_then(|def| def.rules.on_event)
-            .map(|rule| rule(ctx, id, event))
-            .unwrap_or_default(),
-        ListenerRef::Relic(id) => state
-            .combat()
-            .and_then(|combat| combat.relics.get(&id))
-            .and_then(|instance| registry.relics.get(instance.def))
-            .and_then(|def| def.rules.on_event)
-            .map(|rule| rule(ctx, id, event))
-            .unwrap_or_default(),
-        ListenerRef::Potion(id) => state
-            .combat()
-            .and_then(|combat| combat.potions.get(&id))
-            .and_then(|instance| registry.potions.get(instance.def))
-            .and_then(|def| def.rules.on_event)
-            .map(|rule| rule(ctx, id, event))
-            .unwrap_or_default(),
-        ListenerRef::Monster(id) => state
-            .creature(id)
-            .and_then(|creature| creature.model)
-            .and_then(|model| registry.monsters.get(model))
-            .and_then(|def| def.rules.on_event)
-            .map(|rule| rule(ctx, id, event))
-            .unwrap_or_default(),
-        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
-            card_def(registry, state, id)
-                .and_then(|def| def.rules.on_event)
-                .map(|rule| rule(ctx, id, event))
-                .unwrap_or_default()
-        }
-        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => Vec::new(),
-    }
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_event(ctx, event))
+        .unwrap_or_default()
 }
 
 fn dispatch_modify_damage(
@@ -325,68 +298,9 @@ fn dispatch_modify_damage(
     phase: ModifierPhase,
     calc: DamageCalc,
 ) -> DamageCalc {
-    match listener {
-        ListenerRef::Power(id) => state
-            .combat()
-            .and_then(|combat| combat.powers.get(&id))
-            .and_then(|instance| registry.powers.get(instance.def))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_damage_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_damage_multiplicative,
-                ModifierPhase::Capping => def.rules.modify_damage_cap,
-                ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Relic(id) => state
-            .combat()
-            .and_then(|combat| combat.relics.get(&id))
-            .and_then(|instance| registry.relics.get(instance.def))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_damage_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_damage_multiplicative,
-                ModifierPhase::Capping => def.rules.modify_damage_cap,
-                ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Potion(id) => state
-            .combat()
-            .and_then(|combat| combat.potions.get(&id))
-            .and_then(|instance| registry.potions.get(instance.def))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_damage_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_damage_multiplicative,
-                ModifierPhase::Capping => def.rules.modify_damage_cap,
-                ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Monster(id) => state
-            .creature(id)
-            .and_then(|creature| creature.model)
-            .and_then(|model| registry.monsters.get(model))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_damage_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_damage_multiplicative,
-                ModifierPhase::Capping => def.rules.modify_damage_cap,
-                ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
-            card_def(registry, state, id)
-                .and_then(|def| match phase {
-                    ModifierPhase::Additive => def.rules.modify_damage_additive,
-                    ModifierPhase::Multiplicative => def.rules.modify_damage_multiplicative,
-                    ModifierPhase::Capping => def.rules.modify_damage_cap,
-                    ModifierPhase::Replacement => None,
-                })
-                .map(|rule| rule(ctx, id, calc.clone()))
-                .unwrap_or(calc)
-        }
-        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => calc,
-    }
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_damage(ctx, phase, calc.clone()))
+        .unwrap_or(calc)
 }
 
 fn dispatch_modify_block(
@@ -397,63 +311,9 @@ fn dispatch_modify_block(
     phase: ModifierPhase,
     calc: BlockCalc,
 ) -> BlockCalc {
-    match listener {
-        ListenerRef::Power(id) => state
-            .combat()
-            .and_then(|combat| combat.powers.get(&id))
-            .and_then(|instance| registry.powers.get(instance.def))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_block_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_block_multiplicative,
-                ModifierPhase::Capping | ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Relic(id) => state
-            .combat()
-            .and_then(|combat| combat.relics.get(&id))
-            .and_then(|instance| registry.relics.get(instance.def))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_block_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_block_multiplicative,
-                ModifierPhase::Capping | ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Potion(id) => state
-            .combat()
-            .and_then(|combat| combat.potions.get(&id))
-            .and_then(|instance| registry.potions.get(instance.def))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_block_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_block_multiplicative,
-                ModifierPhase::Capping | ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Monster(id) => state
-            .creature(id)
-            .and_then(|creature| creature.model)
-            .and_then(|model| registry.monsters.get(model))
-            .and_then(|def| match phase {
-                ModifierPhase::Additive => def.rules.modify_block_additive,
-                ModifierPhase::Multiplicative => def.rules.modify_block_multiplicative,
-                ModifierPhase::Capping | ModifierPhase::Replacement => None,
-            })
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
-            card_def(registry, state, id)
-                .and_then(|def| match phase {
-                    ModifierPhase::Additive => def.rules.modify_block_additive,
-                    ModifierPhase::Multiplicative => def.rules.modify_block_multiplicative,
-                    ModifierPhase::Capping | ModifierPhase::Replacement => None,
-                })
-                .map(|rule| rule(ctx, id, calc.clone()))
-                .unwrap_or(calc)
-        }
-        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => calc,
-    }
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_block(ctx, phase, calc.clone()))
+        .unwrap_or(calc)
 }
 
 fn dispatch_modify_resource_cost(
@@ -463,43 +323,9 @@ fn dispatch_modify_resource_cost(
     ctx: &RuleCtx<'_>,
     calc: ResourceCostCalc,
 ) -> ResourceCostCalc {
-    match listener {
-        ListenerRef::Power(id) => state
-            .combat()
-            .and_then(|combat| combat.powers.get(&id))
-            .and_then(|instance| registry.powers.get(instance.def))
-            .and_then(|def| def.rules.modify_resource_cost)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Relic(id) => state
-            .combat()
-            .and_then(|combat| combat.relics.get(&id))
-            .and_then(|instance| registry.relics.get(instance.def))
-            .and_then(|def| def.rules.modify_resource_cost)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Potion(id) => state
-            .combat()
-            .and_then(|combat| combat.potions.get(&id))
-            .and_then(|instance| registry.potions.get(instance.def))
-            .and_then(|def| def.rules.modify_resource_cost)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Monster(id) => state
-            .creature(id)
-            .and_then(|creature| creature.model)
-            .and_then(|model| registry.monsters.get(model))
-            .and_then(|def| def.rules.modify_resource_cost)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
-            card_def(registry, state, id)
-                .and_then(|def| def.rules.modify_resource_cost)
-                .map(|rule| rule(ctx, id, calc.clone()))
-                .unwrap_or(calc)
-        }
-        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => calc,
-    }
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_resource_cost(ctx, calc.clone()))
+        .unwrap_or(calc)
 }
 
 fn dispatch_modify_card_play_result_pile(
@@ -509,43 +335,9 @@ fn dispatch_modify_card_play_result_pile(
     ctx: &RuleCtx<'_>,
     calc: CardPlayResultPileCalc,
 ) -> CardPlayResultPileCalc {
-    match listener {
-        ListenerRef::Power(id) => state
-            .combat()
-            .and_then(|combat| combat.powers.get(&id))
-            .and_then(|instance| registry.powers.get(instance.def))
-            .and_then(|def| def.rules.modify_card_play_result_pile)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Relic(id) => state
-            .combat()
-            .and_then(|combat| combat.relics.get(&id))
-            .and_then(|instance| registry.relics.get(instance.def))
-            .and_then(|def| def.rules.modify_card_play_result_pile)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Potion(id) => state
-            .combat()
-            .and_then(|combat| combat.potions.get(&id))
-            .and_then(|instance| registry.potions.get(instance.def))
-            .and_then(|def| def.rules.modify_card_play_result_pile)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Monster(id) => state
-            .creature(id)
-            .and_then(|creature| creature.model)
-            .and_then(|model| registry.monsters.get(model))
-            .and_then(|def| def.rules.modify_card_play_result_pile)
-            .map(|rule| rule(ctx, id, calc.clone()))
-            .unwrap_or(calc),
-        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
-            card_def(registry, state, id)
-                .and_then(|def| def.rules.modify_card_play_result_pile)
-                .map(|rule| rule(ctx, id, calc.clone()))
-                .unwrap_or(calc)
-        }
-        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => calc,
-    }
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_card_play_result_pile(ctx, calc.clone()))
+        .unwrap_or(calc)
 }
 
 fn dispatch_decision(
@@ -555,43 +347,243 @@ fn dispatch_decision(
     ctx: &RuleCtx<'_>,
     query: &DecisionQuery,
 ) -> Decision {
-    match listener {
-        ListenerRef::Power(id) => state
-            .combat()
-            .and_then(|combat| combat.powers.get(&id))
-            .and_then(|instance| registry.powers.get(instance.def))
-            .and_then(|def| def.rules.decide)
-            .map(|rule| rule(ctx, id, query))
-            .unwrap_or(Decision::Allow),
-        ListenerRef::Relic(id) => state
-            .combat()
-            .and_then(|combat| combat.relics.get(&id))
-            .and_then(|instance| registry.relics.get(instance.def))
-            .and_then(|def| def.rules.decide)
-            .map(|rule| rule(ctx, id, query))
-            .unwrap_or(Decision::Allow),
-        ListenerRef::Potion(id) => state
-            .combat()
-            .and_then(|combat| combat.potions.get(&id))
-            .and_then(|instance| registry.potions.get(instance.def))
-            .and_then(|def| def.rules.decide)
-            .map(|rule| rule(ctx, id, query))
-            .unwrap_or(Decision::Allow),
-        ListenerRef::Monster(id) => state
-            .creature(id)
-            .and_then(|creature| creature.model)
-            .and_then(|model| registry.monsters.get(model))
-            .and_then(|def| def.rules.decide)
-            .map(|rule| rule(ctx, id, query))
-            .unwrap_or(Decision::Allow),
-        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
-            card_def(registry, state, id)
-                .and_then(|def| def.rules.decide)
-                .map(|rule| rule(ctx, id, query))
-                .unwrap_or(Decision::Allow)
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_decision(ctx, query))
+        .unwrap_or(Decision::Allow)
+}
+
+#[derive(Clone, Copy)]
+enum ListenerRulesRef<'a> {
+    Power(PowerInstanceId, &'a PowerRules),
+    Relic(RelicInstanceId, &'a RelicRules),
+    Potion(PotionInstanceId, &'a PotionRules),
+    Monster(CreatureId, &'a MonsterRules),
+    Card(CardInstanceId, &'a CardRules),
+}
+
+impl<'a> ListenerRulesRef<'a> {
+    fn for_listener(
+        registry: &'a StaticRegistry,
+        state: &GameState,
+        listener: ListenerRef,
+    ) -> Option<Self> {
+        match listener {
+            ListenerRef::Power(id) => {
+                let def = state
+                    .combat()
+                    .and_then(|combat| combat.powers.get(&id))
+                    .and_then(|instance| registry.powers.get(instance.def))?;
+                Some(Self::Power(id, &def.rules))
+            }
+            ListenerRef::Relic(id) => {
+                let def = state
+                    .combat()
+                    .and_then(|combat| combat.relics.get(&id))
+                    .and_then(|instance| registry.relics.get(instance.def))?;
+                Some(Self::Relic(id, &def.rules))
+            }
+            ListenerRef::Potion(id) => {
+                let def = state
+                    .combat()
+                    .and_then(|combat| combat.potions.get(&id))
+                    .and_then(|instance| registry.potions.get(instance.def))?;
+                Some(Self::Potion(id, &def.rules))
+            }
+            ListenerRef::Monster(id) => {
+                let def = state
+                    .creature(id)
+                    .and_then(|creature| creature.model)
+                    .and_then(|model| registry.monsters.get(model))?;
+                Some(Self::Monster(id, &def.rules))
+            }
+            ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
+                let def = card_def(registry, state, id)?;
+                Some(Self::Card(id, &def.rules))
+            }
+            ListenerRef::Orb(_) | ListenerRef::Modifier(_) => None,
         }
-        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => Decision::Allow,
     }
+
+    fn dispatch_event(self, ctx: &RuleCtx<'_>, event: &Event) -> Vec<Effect> {
+        match self {
+            Self::Power(id, rules) => apply_event(ctx, id, rules.on_event, event),
+            Self::Relic(id, rules) => apply_event(ctx, id, rules.on_event, event),
+            Self::Potion(id, rules) => apply_event(ctx, id, rules.on_event, event),
+            Self::Monster(id, rules) => apply_event(ctx, id, rules.on_event, event),
+            Self::Card(id, rules) => apply_event(ctx, id, rules.on_event, event),
+        }
+    }
+
+    fn dispatch_modify_damage(
+        self,
+        ctx: &RuleCtx<'_>,
+        phase: ModifierPhase,
+        calc: DamageCalc,
+    ) -> DamageCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
+        }
+    }
+
+    fn dispatch_modify_block(
+        self,
+        ctx: &RuleCtx<'_>,
+        phase: ModifierPhase,
+        calc: BlockCalc,
+    ) -> BlockCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+        }
+    }
+
+    fn dispatch_modify_resource_cost(
+        self,
+        ctx: &RuleCtx<'_>,
+        calc: ResourceCostCalc,
+    ) -> ResourceCostCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
+        }
+    }
+
+    fn dispatch_modify_card_play_result_pile(
+        self,
+        ctx: &RuleCtx<'_>,
+        calc: CardPlayResultPileCalc,
+    ) -> CardPlayResultPileCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_card_play_result_pile, calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_card_play_result_pile, calc),
+            Self::Potion(id, rules) => {
+                apply_calc(ctx, id, rules.modify_card_play_result_pile, calc)
+            }
+            Self::Monster(id, rules) => {
+                apply_calc(ctx, id, rules.modify_card_play_result_pile, calc)
+            }
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_card_play_result_pile, calc),
+        }
+    }
+
+    fn dispatch_decision(self, ctx: &RuleCtx<'_>, query: &DecisionQuery) -> Decision {
+        match self {
+            Self::Power(id, rules) => apply_decision(ctx, id, rules.decide, query),
+            Self::Relic(id, rules) => apply_decision(ctx, id, rules.decide, query),
+            Self::Potion(id, rules) => apply_decision(ctx, id, rules.decide, query),
+            Self::Monster(id, rules) => apply_decision(ctx, id, rules.decide, query),
+            Self::Card(id, rules) => apply_decision(ctx, id, rules.decide, query),
+        }
+    }
+}
+
+trait DamageRuleSet<Id> {
+    fn damage_rule(
+        &self,
+        phase: ModifierPhase,
+    ) -> Option<for<'ctx> fn(&RuleCtx<'ctx>, Id, DamageCalc) -> DamageCalc>;
+}
+
+macro_rules! impl_damage_rule_set {
+    ($rules:ty, $id:ty) => {
+        impl DamageRuleSet<$id> for $rules {
+            fn damage_rule(
+                &self,
+                phase: ModifierPhase,
+            ) -> Option<for<'ctx> fn(&RuleCtx<'ctx>, $id, DamageCalc) -> DamageCalc> {
+                match phase {
+                    ModifierPhase::Additive => self.modify_damage_additive,
+                    ModifierPhase::Multiplicative => self.modify_damage_multiplicative,
+                    ModifierPhase::Capping => self.modify_damage_cap,
+                    ModifierPhase::Replacement => None,
+                }
+            }
+        }
+    };
+}
+
+impl_damage_rule_set!(PowerRules, PowerInstanceId);
+impl_damage_rule_set!(RelicRules, RelicInstanceId);
+impl_damage_rule_set!(PotionRules, PotionInstanceId);
+impl_damage_rule_set!(MonsterRules, CreatureId);
+impl_damage_rule_set!(CardRules, CardInstanceId);
+
+trait BlockRuleSet<Id> {
+    fn block_rule(
+        &self,
+        phase: ModifierPhase,
+    ) -> Option<for<'ctx> fn(&RuleCtx<'ctx>, Id, BlockCalc) -> BlockCalc>;
+}
+
+macro_rules! impl_block_rule_set {
+    ($rules:ty, $id:ty) => {
+        impl BlockRuleSet<$id> for $rules {
+            fn block_rule(
+                &self,
+                phase: ModifierPhase,
+            ) -> Option<for<'ctx> fn(&RuleCtx<'ctx>, $id, BlockCalc) -> BlockCalc> {
+                match phase {
+                    ModifierPhase::Additive => self.modify_block_additive,
+                    ModifierPhase::Multiplicative => self.modify_block_multiplicative,
+                    ModifierPhase::Capping | ModifierPhase::Replacement => None,
+                }
+            }
+        }
+    };
+}
+
+impl_block_rule_set!(PowerRules, PowerInstanceId);
+impl_block_rule_set!(RelicRules, RelicInstanceId);
+impl_block_rule_set!(PotionRules, PotionInstanceId);
+impl_block_rule_set!(MonsterRules, CreatureId);
+impl_block_rule_set!(CardRules, CardInstanceId);
+
+fn apply_event<Id>(
+    ctx: &RuleCtx<'_>,
+    id: Id,
+    rule: Option<for<'rule> fn(&RuleCtx<'rule>, Id, &Event) -> Vec<Effect>>,
+    event: &Event,
+) -> Vec<Effect>
+where
+    Id: Copy,
+{
+    rule.map(|rule| rule(ctx, id, event)).unwrap_or_default()
+}
+
+fn apply_calc<Id, Calc>(
+    ctx: &RuleCtx<'_>,
+    id: Id,
+    rule: Option<for<'rule> fn(&RuleCtx<'rule>, Id, Calc) -> Calc>,
+    calc: Calc,
+) -> Calc
+where
+    Id: Copy,
+    Calc: Clone,
+{
+    rule.map(|rule| rule(ctx, id, calc.clone())).unwrap_or(calc)
+}
+
+fn apply_decision<Id>(
+    ctx: &RuleCtx<'_>,
+    id: Id,
+    rule: Option<for<'rule> fn(&RuleCtx<'rule>, Id, &DecisionQuery) -> Decision>,
+    query: &DecisionQuery,
+) -> Decision
+where
+    Id: Copy,
+{
+    rule.map(|rule| rule(ctx, id, query))
+        .unwrap_or(Decision::Allow)
 }
 
 fn card_def<'a>(
