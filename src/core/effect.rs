@@ -35,6 +35,17 @@ pub enum Effect {
         card: CardInstanceId,
         target: Option<CreatureId>,
     },
+    PrepareCardPlayResult {
+        player: PlayerId,
+        card: CardInstanceId,
+        force_exhaust: bool,
+    },
+    FinishCardPlay {
+        player: PlayerId,
+        card: CardInstanceId,
+        target: Option<CreatureId>,
+        force_exhaust: bool,
+    },
     DealDamage(DamageOp),
     DealDamageToAllEnemies(DamageAllEnemiesOp),
     DealDamageToRandomEnemy(RandomDamageOp),

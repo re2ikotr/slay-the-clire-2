@@ -2,11 +2,11 @@ use rust_decimal::Decimal;
 
 use crate::core::effect::{Effect, Source};
 use crate::core::event::Event;
-use crate::core::ids::{CardInstanceId, CreatureId};
+use crate::core::ids::{CardInstanceId, CreatureId, PlayerId};
 use crate::core::listener::{collect_combat_listeners, ListenerRef, ListenerScope};
 use crate::core::query::{
-    BlockCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind, ModifierLog, ModifierPhase,
-    PreventReason, ResourceCostCalc,
+    BlockCalc, CardPlayResultPileCalc, CardPlayResultPileModifierLog, DamageCalc, Decision,
+    DecisionQuery, DecisionQueryKind, ModifierLog, ModifierPhase, PreventReason, ResourceCostCalc,
 };
 use crate::core::state::GameState;
 use crate::registry::StaticRegistry;
@@ -16,7 +16,7 @@ pub struct RulePipeline;
 
 impl RulePipeline {
     pub fn notify(registry: &StaticRegistry, state: &GameState, event: &Event) -> Vec<Effect> {
-        let listeners = collect_combat_listeners(state, event_scope(event));
+        let listeners = collect_combat_listeners(state, event_listener_scope(event));
         let mut out = Vec::new();
 
         for listener in listeners {
@@ -36,12 +36,6 @@ impl RulePipeline {
         state: &GameState,
         calc: DamageCalc,
     ) -> (DamageCalc, Vec<ModifierLog>) {
-        let listeners = collect_combat_listeners(
-            state,
-            calc.source
-                .map(ListenerScope::Source)
-                .unwrap_or(ListenerScope::Creature(calc.target)),
-        );
         let mut calc = calc;
         let mut logs = Vec::new();
 
@@ -50,6 +44,7 @@ impl RulePipeline {
             ModifierPhase::Multiplicative,
             ModifierPhase::Capping,
         ] {
+            let listeners = collect_combat_listeners(state, damage_listener_scope(&calc));
             for listener in listeners.iter().copied() {
                 let before = calc.amount;
                 let ctx = RuleCtx {
@@ -77,16 +72,11 @@ impl RulePipeline {
         state: &GameState,
         calc: BlockCalc,
     ) -> (BlockCalc, Vec<ModifierLog>) {
-        let listeners = collect_combat_listeners(
-            state,
-            calc.source
-                .map(ListenerScope::Source)
-                .unwrap_or(ListenerScope::Creature(calc.target)),
-        );
         let mut calc = calc;
         let mut logs = Vec::new();
 
         for phase in [ModifierPhase::Additive, ModifierPhase::Multiplicative] {
+            let listeners = collect_combat_listeners(state, block_listener_scope(&calc));
             for listener in listeners.iter().copied() {
                 let before = calc.amount;
                 let ctx = RuleCtx {
@@ -114,7 +104,7 @@ impl RulePipeline {
         state: &GameState,
         calc: ResourceCostCalc,
     ) -> (ResourceCostCalc, Vec<ModifierLog>) {
-        let listeners = collect_combat_listeners(state, ListenerScope::Combat);
+        let listeners = collect_combat_listeners(state, resource_cost_listener_scope(state, &calc));
         let mut calc = calc;
         let mut logs = Vec::new();
 
@@ -139,12 +129,41 @@ impl RulePipeline {
         (calc, logs)
     }
 
-    pub fn decide(
+    pub fn modify_card_play_result_pile(
         registry: &StaticRegistry,
         state: &GameState,
-        scope: ListenerScope,
-        query: DecisionQuery,
-    ) -> Decision {
+        calc: CardPlayResultPileCalc,
+    ) -> (CardPlayResultPileCalc, Vec<CardPlayResultPileModifierLog>) {
+        let listeners =
+            collect_combat_listeners(state, card_result_pile_listener_scope(state, &calc));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before_pile = calc.pile;
+            let before_position = calc.position;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_card_play_result_pile(registry, state, listener, &ctx, calc);
+            if calc.pile != before_pile || calc.position != before_position {
+                logs.push(CardPlayResultPileModifierLog {
+                    listener,
+                    before_pile,
+                    after_pile: calc.pile,
+                    before_position,
+                    after_position: calc.position,
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
+    pub fn decide(registry: &StaticRegistry, state: &GameState, query: DecisionQuery) -> Decision {
+        let scope = decision_listener_scope(state, &query);
         for listener in collect_combat_listeners(state, scope) {
             let ctx = RuleCtx {
                 state,
@@ -174,7 +193,6 @@ impl RulePipeline {
         Self::decide(
             registry,
             state,
-            ListenerScope::Combat,
             DecisionQuery {
                 kind: DecisionQueryKind::ShouldPlay { card, target },
                 source: Some(Source::Card(card)),
@@ -191,7 +209,6 @@ impl RulePipeline {
         Self::decide(
             registry,
             state,
-            ListenerScope::Combat,
             DecisionQuery {
                 kind: DecisionQueryKind::ShouldDraw {
                     player,
@@ -210,7 +227,6 @@ impl RulePipeline {
         Self::decide(
             registry,
             state,
-            ListenerScope::Creature(creature),
             DecisionQuery {
                 kind: DecisionQueryKind::ShouldClearBlock { creature },
                 source: None,
@@ -226,7 +242,6 @@ impl RulePipeline {
         Self::decide(
             registry,
             state,
-            ListenerScope::Creature(creature),
             DecisionQuery {
                 kind: DecisionQueryKind::ShouldDie { creature },
                 source: None,
@@ -242,7 +257,6 @@ impl RulePipeline {
         Self::decide(
             registry,
             state,
-            ListenerScope::Combat,
             DecisionQuery {
                 kind: DecisionQueryKind::ShouldRemoveCreatureAfterDeath { creature },
                 source: None,
@@ -488,6 +502,52 @@ fn dispatch_modify_resource_cost(
     }
 }
 
+fn dispatch_modify_card_play_result_pile(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: CardPlayResultPileCalc,
+) -> CardPlayResultPileCalc {
+    match listener {
+        ListenerRef::Power(id) => state
+            .combat()
+            .and_then(|combat| combat.powers.get(&id))
+            .and_then(|instance| registry.powers.get(instance.def))
+            .and_then(|def| def.rules.modify_card_play_result_pile)
+            .map(|rule| rule(ctx, id, calc.clone()))
+            .unwrap_or(calc),
+        ListenerRef::Relic(id) => state
+            .combat()
+            .and_then(|combat| combat.relics.get(&id))
+            .and_then(|instance| registry.relics.get(instance.def))
+            .and_then(|def| def.rules.modify_card_play_result_pile)
+            .map(|rule| rule(ctx, id, calc.clone()))
+            .unwrap_or(calc),
+        ListenerRef::Potion(id) => state
+            .combat()
+            .and_then(|combat| combat.potions.get(&id))
+            .and_then(|instance| registry.potions.get(instance.def))
+            .and_then(|def| def.rules.modify_card_play_result_pile)
+            .map(|rule| rule(ctx, id, calc.clone()))
+            .unwrap_or(calc),
+        ListenerRef::Monster(id) => state
+            .creature(id)
+            .and_then(|creature| creature.model)
+            .and_then(|model| registry.monsters.get(model))
+            .and_then(|def| def.rules.modify_card_play_result_pile)
+            .map(|rule| rule(ctx, id, calc.clone()))
+            .unwrap_or(calc),
+        ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
+            card_def(registry, state, id)
+                .and_then(|def| def.rules.modify_card_play_result_pile)
+                .map(|rule| rule(ctx, id, calc.clone()))
+                .unwrap_or(calc)
+        }
+        ListenerRef::Orb(_) | ListenerRef::Modifier(_) => calc,
+    }
+}
+
 fn dispatch_decision(
     registry: &StaticRegistry,
     state: &GameState,
@@ -544,26 +604,105 @@ fn card_def<'a>(
         .and_then(|card| registry.cards.get(card.def))
 }
 
-fn event_scope(event: &Event) -> ListenerScope {
+fn event_listener_scope(event: &Event) -> ListenerScope {
+    // Post-fact events stay combat broadcasts; Query and Decision points carry narrower scopes.
     match event {
-        Event::CardsShuffled(_) => ListenerScope::Combat,
-        Event::CardDrawn(event) => ListenerScope::Source(Source::Card(event.card)),
-        Event::CardExhausted(event) => ListenerScope::Source(Source::Card(event.card)),
-        Event::CardUpgraded(event) => ListenerScope::Source(Source::Card(event.card)),
-        Event::CardPlayStarted(event) => ListenerScope::Source(Source::Card(event.card)),
-        Event::CardPlayed(event) => ListenerScope::Source(Source::Card(event.card)),
-        Event::DamageDealt(event) => ListenerScope::Creature(event.target),
-        Event::BlockGained(event) => ListenerScope::Creature(event.target),
-        Event::PowerApplied(event) => ListenerScope::Creature(event.target),
-        Event::ResourceSpent(_) | Event::ResourceGained(_) => ListenerScope::Combat,
-        Event::CreatureHpChanged(event) => ListenerScope::Creature(event.creature),
-        Event::DeathPrevented { creature } | Event::CreatureDied { creature } => {
-            ListenerScope::Creature(*creature)
+        Event::CombatStarted
+        | Event::TurnStarted { .. }
+        | Event::TurnEnded { .. }
+        | Event::CardsShuffled(_)
+        | Event::CardDrawn(_)
+        | Event::CardExhausted(_)
+        | Event::CardUpgraded(_)
+        | Event::CardPlayStarted(_)
+        | Event::CardPlayed(_)
+        | Event::DamageDealt(_)
+        | Event::BlockGained(_)
+        | Event::PowerApplied(_)
+        | Event::ResourceSpent(_)
+        | Event::ResourceGained(_)
+        | Event::CreatureHpChanged(_)
+        | Event::DeathPrevented { .. }
+        | Event::CreatureDied { .. } => ListenerScope::Combat,
+    }
+}
+
+fn damage_listener_scope(calc: &DamageCalc) -> ListenerScope {
+    ListenerScope::related(
+        related_creatures([calc.dealer, Some(calc.target)]),
+        calc.source,
+    )
+}
+
+fn block_listener_scope(calc: &BlockCalc) -> ListenerScope {
+    ListenerScope::related([calc.target], calc.source)
+}
+
+fn resource_cost_listener_scope(state: &GameState, calc: &ResourceCostCalc) -> ListenerScope {
+    ListenerScope::related(
+        player_creature_for(state, calc.player),
+        Some(Source::Card(calc.card)),
+    )
+}
+
+fn card_result_pile_listener_scope(
+    state: &GameState,
+    calc: &CardPlayResultPileCalc,
+) -> ListenerScope {
+    ListenerScope::related(
+        card_owner_creature(state, calc.card),
+        Some(Source::Card(calc.card)),
+    )
+}
+
+fn decision_listener_scope(state: &GameState, query: &DecisionQuery) -> ListenerScope {
+    match query.kind {
+        DecisionQueryKind::ShouldPlay { card, target } => {
+            let source = query.source.or(Some(Source::Card(card)));
+            ListenerScope::related(
+                related_creatures([card_owner_creature(state, card), target]),
+                source,
+            )
         }
-        Event::CombatStarted | Event::TurnStarted { .. } | Event::TurnEnded { .. } => {
-            ListenerScope::Combat
+        DecisionQueryKind::ShouldDraw { player, .. }
+        | DecisionQueryKind::ShouldFlush { player }
+        | DecisionQueryKind::ShouldPayExcessEnergyCostWithStars { player }
+        | DecisionQueryKind::ShouldTakeExtraTurn { player } => {
+            ListenerScope::related(player_creature_for(state, player), query.source)
+        }
+        DecisionQueryKind::ShouldDie { creature }
+        | DecisionQueryKind::ShouldRemoveCreatureAfterDeath { creature }
+        | DecisionQueryKind::ShouldClearBlock { creature } => {
+            ListenerScope::related([creature], query.source)
+        }
+        DecisionQueryKind::ShouldStopCombatFromEnding
+        | DecisionQueryKind::ShouldStartTurn { .. } => ListenerScope::Combat,
+    }
+}
+
+fn related_creatures<const N: usize>(creatures: [Option<CreatureId>; N]) -> Vec<CreatureId> {
+    let mut out = Vec::new();
+    for creature in creatures.into_iter().flatten() {
+        if !out.contains(&creature) {
+            out.push(creature);
         }
     }
+    out
+}
+
+fn player_creature_for(state: &GameState, player: PlayerId) -> Option<CreatureId> {
+    state.combat().and_then(|combat| {
+        if combat.player.id == player {
+            Some(combat.player.creature)
+        } else {
+            None
+        }
+    })
+}
+
+fn card_owner_creature(state: &GameState, card: CardInstanceId) -> Option<CreatureId> {
+    let owner = state.card(card)?.owner;
+    player_creature_for(state, owner)
 }
 
 pub fn prevent_by_current_listener(ctx: &RuleCtx<'_>, reason: PreventReason) -> Decision {

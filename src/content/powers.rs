@@ -5,11 +5,11 @@ use crate::core::effect::{DamageKind, Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
 use crate::core::query::{
-    BlockCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
-    ResourceCostCalc,
+    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind,
+    PreventReason, ResourceCostCalc,
 };
 use crate::core::rules::{prevent_by_current_listener, RuleCtx};
-use crate::core::state::{ResourceKind, Side};
+use crate::core::state::{PileId, PileKind, ResourceKind, Side};
 use crate::registry::DefRegistry;
 
 pub type PowerEventFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, &Event) -> Vec<Effect>;
@@ -17,6 +17,8 @@ pub type PowerModifyDamageFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, DamageC
 pub type PowerModifyBlockFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, BlockCalc) -> BlockCalc;
 pub type PowerModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, PowerInstanceId, ResourceCostCalc) -> ResourceCostCalc;
+pub type PowerModifyResultPileFn =
+    for<'a> fn(&RuleCtx<'a>, PowerInstanceId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type PowerDecisionFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, &DecisionQuery) -> Decision;
 
 #[derive(Clone)]
@@ -35,6 +37,7 @@ pub struct PowerRules {
     pub modify_block_additive: Option<PowerModifyBlockFn>,
     pub modify_block_multiplicative: Option<PowerModifyBlockFn>,
     pub modify_resource_cost: Option<PowerModifyResourceCostFn>,
+    pub modify_card_play_result_pile: Option<PowerModifyResultPileFn>,
     pub decide: Option<PowerDecisionFn>,
 }
 
@@ -184,6 +187,7 @@ fn corruption() -> PowerDef {
         loc_key: LocKey::new("power.corruption"),
         rules: PowerRules {
             modify_resource_cost: Some(corruption_modify_cost),
+            modify_card_play_result_pile: Some(corruption_modify_result_pile),
             ..PowerRules::default()
         },
     }
@@ -404,6 +408,33 @@ fn corruption_modify_cost(
         .unwrap_or(false);
     if calc.resource == ResourceKind::Energy && is_skill {
         calc.cost = 0;
+    }
+    calc
+}
+
+fn corruption_modify_result_pile(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: CardPlayResultPileCalc,
+) -> CardPlayResultPileCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    let Some(card) = ctx.state.card(calc.card) else {
+        return calc;
+    };
+    let card_owner_creature = ctx
+        .state
+        .combat()
+        .and_then(|combat| (combat.player.id == card.owner).then_some(combat.player.creature));
+    let is_skill = ctx
+        .registry
+        .cards
+        .get(card.def)
+        .map(|def| def.card_type == CardType::Skill)
+        .unwrap_or(false);
+    if card_owner_creature == Some(instance.owner) && is_skill {
+        calc.pile = PileId::player(card.owner, PileKind::Exhaust);
     }
     calc
 }

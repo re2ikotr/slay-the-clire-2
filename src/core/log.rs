@@ -2,7 +2,7 @@ use crate::core::effect::{DamageResult, Effect, MoveReason};
 use crate::core::engine::CombatResult;
 use crate::core::event::Event;
 use crate::core::ids::{CardInstanceId, CreatureId, PlayerId, PowerInstanceId};
-use crate::core::query::{Decision, ModifierLog};
+use crate::core::query::{CardPlayResultPileModifierLog, Decision, ModifierLog};
 use crate::core::state::{CardCounter, PileId, ResourceKind, StateError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +11,7 @@ pub enum LogEntry {
     EventTriggered(Event),
     StateChanged(StateChange),
     ModifierApplied(ModifierLog),
+    CardPlayResultPileModified(CardPlayResultPileModifierLog),
     DecisionMade(Decision),
     ChoiceRequested(crate::core::effect::ChoiceRequest),
     CombatEnded(CombatResult),

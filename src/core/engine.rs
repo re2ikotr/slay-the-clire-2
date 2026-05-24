@@ -1,8 +1,6 @@
-use crate::content::cards::{CardKeyword, CardType};
-use crate::content::powers::CORRUPTION_POWER;
 use crate::core::command::{Command, CommandError};
 use crate::core::effect::{Effect, MoveReason};
-use crate::core::event::{CardPlayStarted, CardPlayed, Event};
+use crate::core::event::{CardPlayStarted, Event};
 use crate::core::log::LogEntry;
 use crate::core::resolver::EffectResolver;
 use crate::core::state::{CombatPhase, GameState, PileId, PileKind, Side};
@@ -42,7 +40,7 @@ impl Engine {
             return StepResult::Rejected(CommandError::UnexpectedChoice, self.resolver.take_log());
         }
 
-        match command_to_effects(&self.state, &self.registry, command) {
+        match command_to_effects(&self.state, command) {
             Ok(effects) => {
                 self.resolver.enqueue_all(effects);
                 self.resolver.drain(&mut self.state, &self.registry)
@@ -72,11 +70,7 @@ pub enum CombatOutcome {
     Defeat,
 }
 
-fn command_to_effects(
-    state: &GameState,
-    registry: &StaticRegistry,
-    command: Command,
-) -> Result<Vec<Effect>, CommandError> {
+fn command_to_effects(state: &GameState, command: Command) -> Result<Vec<Effect>, CommandError> {
     match command {
         Command::PlayCard {
             player,
@@ -92,7 +86,6 @@ fn command_to_effects(
             }
 
             let play = PileId::player(player, PileKind::Play);
-            let (result_pile, result_reason) = card_result_pile(state, registry, player, card)?;
             Ok(vec![
                 Effect::ValidateCardPlay {
                     player,
@@ -110,21 +103,22 @@ fn command_to_effects(
                     to: play,
                     reason: MoveReason::Play,
                 },
+                Effect::PrepareCardPlayResult {
+                    player,
+                    card,
+                    force_exhaust: false,
+                },
                 Effect::ExecuteCardBody {
                     player,
                     card,
                     target,
                 },
-                Effect::MoveCard {
-                    card,
-                    to: result_pile,
-                    reason: result_reason,
-                },
-                Effect::Trigger(Event::CardPlayed(CardPlayed {
+                Effect::FinishCardPlay {
                     player,
                     card,
                     target,
-                })),
+                    force_exhaust: false,
+                },
                 Effect::CheckDeaths,
                 Effect::CheckCombatEnd,
             ])
@@ -135,46 +129,6 @@ fn command_to_effects(
         ]),
         Command::UsePotion { .. } => Ok(vec![]),
         Command::Choose { .. } => Err(CommandError::UnexpectedChoice),
-    }
-}
-
-fn card_result_pile(
-    state: &GameState,
-    registry: &StaticRegistry,
-    player: crate::core::ids::PlayerId,
-    card: crate::core::ids::CardInstanceId,
-) -> Result<(PileId, MoveReason), CommandError> {
-    let card_state = state.card(card).ok_or(CommandError::InvalidCard(card))?;
-    let Some(def) = registry.cards.get(card_state.def) else {
-        return Ok((
-            PileId::player(player, PileKind::Discard),
-            MoveReason::Discard,
-        ));
-    };
-
-    let corruption_exhausts_skill = def.card_type == CardType::Skill
-        && state
-            .player_creature_id()
-            .map(|creature| state.has_power(creature, CORRUPTION_POWER))
-            .unwrap_or(false);
-
-    if def.card_type == CardType::Power || card_state.flags.purge_on_use {
-        Ok((
-            PileId::player(player, PileKind::Removed),
-            MoveReason::Removed,
-        ))
-    } else if def.has_keyword(card_state.upgraded, CardKeyword::Exhaust)
-        || corruption_exhausts_skill
-    {
-        Ok((
-            PileId::player(player, PileKind::Exhaust),
-            MoveReason::Exhaust,
-        ))
-    } else {
-        Ok((
-            PileId::player(player, PileKind::Discard),
-            MoveReason::Discard,
-        ))
     }
 }
 
@@ -205,10 +159,13 @@ pub(crate) fn combat_result_for_state(state: &GameState) -> Option<CombatResult>
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
+
     use crate::content::cards::{
         BASH, BATTLE_TRANCE, BLOODLETTING, DEFEND_IRONCLAD, POMMEL_STRIKE, STRIKE_IRONCLAD,
     };
-    use crate::content::powers::{NO_DRAW_POWER, VULNERABLE};
+    use crate::content::powers::{CORRUPTION_POWER, NO_DRAW_POWER, VULNERABLE};
+    use crate::core::effect::Effect;
     use crate::core::event::Event;
     use crate::core::ids::CardId;
     use crate::core::ids::{CardInstanceId, CreatureId};
@@ -456,6 +413,68 @@ mod tests {
     }
 
     #[test]
+    fn corruption_exhausts_manual_skills_through_result_pile_modifier() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(134));
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        engine
+            .state
+            .apply_power(player_creature, CORRUPTION_POWER, Decimal::from(1))
+            .unwrap();
+        let defend = add_card_to_hand(&mut engine, DEFEND_IRONCLAD, false);
+
+        let StepResult::Done(log) = engine.step(Command::PlayCard {
+            player,
+            card: defend,
+            target: None,
+        }) else {
+            panic!("defend should resolve");
+        };
+
+        let combat = engine.state.combat().unwrap();
+        assert!(combat.player.piles.exhaust.contains(&defend));
+        assert!(!combat.player.piles.discard.contains(&defend));
+        assert!(log
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::CardPlayResultPileModified(_))));
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::EventTriggered(Event::CardExhausted(event)) if event.card == defend
+        )));
+    }
+
+    #[test]
+    fn auto_play_uses_shared_result_pile_rules() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(135));
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        engine
+            .state
+            .apply_power(player_creature, CORRUPTION_POWER, Decimal::from(1))
+            .unwrap();
+        let defend = add_card_to_draw(&mut engine, DEFEND_IRONCLAD, false);
+
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::PlayTopDrawCards {
+            player,
+            count: 1,
+            exhaust_after_play: false,
+        });
+
+        let StepResult::Done(log) = resolver.drain(&mut engine.state, &engine.registry) else {
+            panic!("auto-played defend should resolve");
+        };
+
+        let combat = engine.state.combat().unwrap();
+        assert!(combat.player.piles.exhaust.contains(&defend));
+        assert!(!combat.player.piles.discard.contains(&defend));
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::EventTriggered(Event::CardExhausted(event)) if event.card == defend
+        )));
+    }
+
+    #[test]
     fn bloodletting_loses_hp_and_gains_energy_against_nibbit() {
         let mut engine = Engine::new(GameState::basic_nibbit_combat(34));
         let player = engine.state.player_id().unwrap();
@@ -552,6 +571,16 @@ mod tests {
     fn add_card_to_hand(engine: &mut Engine, def: CardId, upgraded: bool) -> CardInstanceId {
         let player = engine.state.player_id().unwrap();
         let to = PileId::player(player, PileKind::Hand);
+        let costs = engine.registry.cards.get(def).unwrap().costs_for(upgraded);
+        engine
+            .state
+            .add_generated_card(player, def, to, upgraded, costs, false, false)
+            .unwrap()
+    }
+
+    fn add_card_to_draw(engine: &mut Engine, def: CardId, upgraded: bool) -> CardInstanceId {
+        let player = engine.state.player_id().unwrap();
+        let to = PileId::player(player, PileKind::Draw);
         let costs = engine.registry.cards.get(def).unwrap().costs_for(upgraded);
         engine
             .state

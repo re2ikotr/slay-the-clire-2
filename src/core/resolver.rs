@@ -9,16 +9,19 @@ use crate::core::effect::{
 };
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
-    BlockGained, CardDrawn, CardExhausted, CardUpgraded, CardsShuffled, CreatureHpChanged, Event,
-    PowerApplied, ResourceChanged,
+    BlockGained, CardDrawn, CardExhausted, CardPlayed, CardUpgraded, CardsShuffled,
+    CreatureHpChanged, Event, PowerApplied, ResourceChanged,
 };
-use crate::core::ids::{ChoiceId, CreatureId};
+use crate::core::ids::{CardInstanceId, ChoiceId, CreatureId, PlayerId};
 use crate::core::listener::ListenerRef;
 use crate::core::log::{LogEntry, StateChange};
-use crate::core::query::{BlockCalc, DamageCalc, Decision, PreventReason, ResourceCostCalc};
+use crate::core::query::{
+    BlockCalc, CardPlayResultPileCalc, CardPlayResultPileModifierLog, DamageCalc, Decision,
+    PilePosition, PreventReason, ResourceCostCalc,
+};
 use crate::core::rules::{RuleCtx, RulePipeline};
 use crate::core::state::{
-    decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileKind, ResourceKind, Side,
+    decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileId, PileKind, ResourceKind, Side,
     StateError, BASE_HAND_DRAW_COUNT,
 };
 use crate::registry::StaticRegistry;
@@ -29,6 +32,8 @@ pub struct EffectResolver {
     pending_choice: Option<crate::core::effect::ChoiceRequest>,
     log: Vec<LogEntry>,
     last_card_payment: std::collections::BTreeMap<crate::core::ids::CardInstanceId, CardPayment>,
+    pending_card_results:
+        std::collections::BTreeMap<crate::core::ids::CardInstanceId, CardPlayResult>,
 }
 
 impl EffectResolver {
@@ -67,6 +72,7 @@ impl EffectResolver {
     fn clear_aborted_resolution(&mut self) {
         self.queue.clear();
         self.last_card_payment.clear();
+        self.pending_card_results.clear();
     }
 
     pub fn drain(&mut self, state: &mut GameState, registry: &StaticRegistry) -> StepResult {
@@ -221,6 +227,17 @@ impl EffectResolver {
                     .unwrap_or_default();
                 self.apply_immediate_effects(state, registry, effects)
             }
+            Effect::PrepareCardPlayResult {
+                player,
+                card,
+                force_exhaust,
+            } => self.prepare_card_play_result(state, registry, player, card, force_exhaust),
+            Effect::FinishCardPlay {
+                player,
+                card,
+                target,
+                force_exhaust,
+            } => self.finish_card_play(state, registry, player, card, target, force_exhaust),
             Effect::DealDamage(op) => self.apply_damage(state, registry, op),
             Effect::DealDamageToAllEnemies(op) => {
                 let mut effects = Vec::new();
@@ -720,7 +737,7 @@ impl EffectResolver {
             .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
 
         let target = op.target;
-        let Some(creature) = state.creature_mut(target) else {
+        let Some(creature) = state.creature(target) else {
             return ApplyResult::StateError(StateError::UnknownCreature(target));
         };
 
@@ -731,28 +748,29 @@ impl EffectResolver {
         };
 
         let hp_before = creature.hp;
+        let block_before = creature.block;
         let mut blocked = 0;
         let mut hp_loss = requested;
 
         if !op.flags.ignores_block {
-            let blocked_decimal = if Decimal::from(creature.block) < requested {
-                Decimal::from(creature.block)
+            let blocked_decimal = if Decimal::from(block_before) < requested {
+                Decimal::from(block_before)
             } else {
                 requested
             };
-            blocked = decimal_to_i32_trunc(blocked_decimal);
-            creature.block = creature.block.saturating_sub(blocked);
+            let block_loss = decimal_to_i32_trunc(blocked_decimal);
+            blocked = match state.lose_block(target, block_loss) {
+                Ok(actual) => actual,
+                Err(error) => return ApplyResult::StateError(error),
+            };
             hp_loss = requested - blocked_decimal;
         }
 
-        let hp_loss_int = decimal_to_i32_trunc(hp_loss);
-        creature.hp = creature.hp.saturating_sub(hp_loss_int).max(0);
-        let hp_after = creature.hp;
-        let actual_hp_loss = hp_before - hp_after;
-        let is_player = state.player_creature_id() == Some(target);
-        if is_player && actual_hp_loss > 0 {
-            state.record_player_hp_loss(actual_hp_loss);
-        }
+        let actual_hp_loss = match state.lose_hp(target, hp_loss) {
+            Ok(actual) => actual,
+            Err(error) => return ApplyResult::StateError(error),
+        };
+        let hp_after = hp_before - actual_hp_loss;
 
         let result = DamageResult {
             source: op.source,
@@ -913,6 +931,88 @@ impl EffectResolver {
         ApplyResult::Continue(Vec::new())
     }
 
+    fn finish_card_play(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        card: CardInstanceId,
+        target: Option<CreatureId>,
+        force_exhaust: bool,
+    ) -> ApplyResult {
+        match self.apply_immediate_effects(
+            state,
+            registry,
+            vec![Effect::Trigger(Event::CardPlayed(CardPlayed {
+                player,
+                card,
+                target,
+            }))],
+        ) {
+            ApplyResult::Continue(_) => {}
+            other => return other,
+        }
+
+        if !state.card_is_in_pile(card, PileKind::Play) {
+            self.pending_card_results.remove(&card);
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let result = if let Some(result) = self.pending_card_results.remove(&card) {
+            result
+        } else {
+            let (pile, reason, modifiers) =
+                match resolve_card_play_result_pile(state, registry, player, card, force_exhaust) {
+                    Ok(result) => result,
+                    Err(error) => return ApplyResult::StateError(error),
+                };
+            self.log.extend(
+                modifiers
+                    .into_iter()
+                    .map(LogEntry::CardPlayResultPileModified),
+            );
+            CardPlayResult { pile, reason }
+        };
+
+        match result.reason {
+            MoveReason::Exhaust => {
+                self.apply_immediate_effects(state, registry, vec![Effect::ExhaustCard { card }])
+            }
+            _ => self.apply_immediate_effects(
+                state,
+                registry,
+                vec![Effect::MoveCard {
+                    card,
+                    to: result.pile,
+                    reason: result.reason,
+                }],
+            ),
+        }
+    }
+
+    fn prepare_card_play_result(
+        &mut self,
+        state: &GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        card: CardInstanceId,
+        force_exhaust: bool,
+    ) -> ApplyResult {
+        let (pile, reason, modifiers) =
+            match resolve_card_play_result_pile(state, registry, player, card, force_exhaust) {
+                Ok(result) => result,
+                Err(error) => return ApplyResult::StateError(error),
+            };
+        self.pending_card_results
+            .insert(card, CardPlayResult { pile, reason });
+        self.log.extend(
+            modifiers
+                .into_iter()
+                .map(LogEntry::CardPlayResultPileModified),
+        );
+        ApplyResult::Continue(Vec::new())
+    }
+
     fn record_event_stats(
         &mut self,
         state: &mut GameState,
@@ -1030,14 +1130,6 @@ impl EffectResolver {
         let target = state.alive_monster_ids().first().copied();
         for card in cards {
             let play = crate::core::state::PileId::player(player, PileKind::Play);
-            let result = if exhaust_after_play {
-                (
-                    crate::core::state::PileId::player(player, PileKind::Exhaust),
-                    MoveReason::Exhaust,
-                )
-            } else {
-                card_auto_result_pile(state, registry, player, card)
-            };
             let effects = vec![
                 Effect::MoveCard {
                     card,
@@ -1051,21 +1143,22 @@ impl EffectResolver {
                         target,
                     },
                 )),
+                Effect::PrepareCardPlayResult {
+                    player,
+                    card,
+                    force_exhaust: exhaust_after_play,
+                },
                 Effect::ExecuteCardBody {
                     player,
                     card,
                     target,
                 },
-                Effect::MoveCard {
-                    card,
-                    to: result.0,
-                    reason: result.1,
-                },
-                Effect::Trigger(Event::CardPlayed(crate::core::event::CardPlayed {
+                Effect::FinishCardPlay {
                     player,
                     card,
                     target,
-                })),
+                    force_exhaust: exhaust_after_play,
+                },
             ];
             match self.apply_immediate_effects(state, registry, effects) {
                 ApplyResult::Continue(_) => {}
@@ -1230,6 +1323,12 @@ struct CardPayment {
     stars: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CardPlayResult {
+    pile: PileId,
+    reason: MoveReason,
+}
+
 fn matching_hand_cards(
     state: &GameState,
     registry: &StaticRegistry,
@@ -1261,39 +1360,51 @@ fn matching_hand_cards(
         .collect()
 }
 
-fn card_auto_result_pile(
+fn resolve_card_play_result_pile(
     state: &GameState,
     registry: &StaticRegistry,
-    player: crate::core::ids::PlayerId,
-    card: crate::core::ids::CardInstanceId,
-) -> (crate::core::state::PileId, MoveReason) {
-    let Some(card_state) = state.card(card) else {
-        return (
-            crate::core::state::PileId::player(player, PileKind::Discard),
-            MoveReason::Discard,
-        );
+    player: PlayerId,
+    card: CardInstanceId,
+    force_exhaust: bool,
+) -> Result<(PileId, MoveReason, Vec<CardPlayResultPileModifierLog>), StateError> {
+    let base_pile = base_card_play_result_pile(state, registry, player, card, force_exhaust)?;
+    let calc = CardPlayResultPileCalc {
+        card,
+        base_pile,
+        pile: base_pile,
+        position: PilePosition::Bottom,
     };
+    let (calc, modifiers) = RulePipeline::modify_card_play_result_pile(registry, state, calc);
+    let reason = move_reason_for_result_pile(calc.pile.kind);
+    Ok((calc.pile, reason, modifiers))
+}
+
+fn base_card_play_result_pile(
+    state: &GameState,
+    registry: &StaticRegistry,
+    player: PlayerId,
+    card: CardInstanceId,
+    force_exhaust: bool,
+) -> Result<PileId, StateError> {
+    let card_state = state.card(card).ok_or(StateError::UnknownCard(card))?;
     let Some(def) = registry.cards.get(card_state.def) else {
-        return (
-            crate::core::state::PileId::player(player, PileKind::Discard),
-            MoveReason::Discard,
-        );
+        return Ok(PileId::player(player, PileKind::Discard));
     };
     if def.card_type == CardType::Power || card_state.flags.purge_on_use {
-        (
-            crate::core::state::PileId::player(player, PileKind::Removed),
-            MoveReason::Removed,
-        )
-    } else if def.has_keyword(card_state.upgraded, CardKeyword::Exhaust) {
-        (
-            crate::core::state::PileId::player(player, PileKind::Exhaust),
-            MoveReason::Exhaust,
-        )
+        Ok(PileId::player(player, PileKind::Removed))
+    } else if force_exhaust || def.has_keyword(card_state.upgraded, CardKeyword::Exhaust) {
+        Ok(PileId::player(player, PileKind::Exhaust))
     } else {
-        (
-            crate::core::state::PileId::player(player, PileKind::Discard),
-            MoveReason::Discard,
-        )
+        Ok(PileId::player(player, PileKind::Discard))
+    }
+}
+
+fn move_reason_for_result_pile(kind: PileKind) -> MoveReason {
+    match kind {
+        PileKind::Discard => MoveReason::Discard,
+        PileKind::Exhaust => MoveReason::Exhaust,
+        PileKind::Removed => MoveReason::Removed,
+        PileKind::Draw | PileKind::Hand | PileKind::Limbo | PileKind::Play => MoveReason::Cleanup,
     }
 }
 

@@ -882,6 +882,16 @@ impl GameState {
         Ok(creature.block - before)
     }
 
+    pub fn lose_block(&mut self, target: CreatureId, amount: i32) -> Result<i32, StateError> {
+        let block_loss = amount.max(0);
+        let creature = self
+            .creature_mut(target)
+            .ok_or(StateError::UnknownCreature(target))?;
+        let before = creature.block;
+        creature.block = creature.block.saturating_sub(block_loss);
+        Ok(before - creature.block)
+    }
+
     pub fn lose_hp(&mut self, target: CreatureId, amount: Decimal) -> Result<i32, StateError> {
         let hp_loss = decimal_to_i32_trunc(amount).max(0);
         let player = self.player_creature_id();

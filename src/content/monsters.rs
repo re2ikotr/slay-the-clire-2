@@ -4,7 +4,9 @@ use crate::content::powers::STRENGTH;
 use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{CreatureId, LocKey, MonsterId};
-use crate::core::query::{BlockCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc};
+use crate::core::query::{
+    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc,
+};
 use crate::core::rules::RuleCtx;
 
 pub type MonsterIntentFn = for<'a> fn(&RuleCtx<'a>, CreatureId) -> MonsterIntent;
@@ -14,6 +16,8 @@ pub type MonsterModifyDamageFn = for<'a> fn(&RuleCtx<'a>, CreatureId, DamageCalc
 pub type MonsterModifyBlockFn = for<'a> fn(&RuleCtx<'a>, CreatureId, BlockCalc) -> BlockCalc;
 pub type MonsterModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, CreatureId, ResourceCostCalc) -> ResourceCostCalc;
+pub type MonsterModifyResultPileFn =
+    for<'a> fn(&RuleCtx<'a>, CreatureId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type MonsterDecisionFn = for<'a> fn(&RuleCtx<'a>, CreatureId, &DecisionQuery) -> Decision;
 
 #[derive(Clone)]
@@ -35,6 +39,7 @@ pub struct MonsterRules {
     pub modify_block_additive: Option<MonsterModifyBlockFn>,
     pub modify_block_multiplicative: Option<MonsterModifyBlockFn>,
     pub modify_resource_cost: Option<MonsterModifyResourceCostFn>,
+    pub modify_card_play_result_pile: Option<MonsterModifyResultPileFn>,
     pub decide: Option<MonsterDecisionFn>,
 }
 

@@ -1,7 +1,9 @@
 use crate::core::effect::Effect;
 use crate::core::event::Event;
 use crate::core::ids::{CreatureId, LocKey, PotionId, PotionInstanceId};
-use crate::core::query::{BlockCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc};
+use crate::core::query::{
+    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc,
+};
 use crate::core::rules::RuleCtx;
 
 pub type PotionUseFn =
@@ -12,6 +14,8 @@ pub type PotionModifyDamageFn =
 pub type PotionModifyBlockFn = for<'a> fn(&RuleCtx<'a>, PotionInstanceId, BlockCalc) -> BlockCalc;
 pub type PotionModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, PotionInstanceId, ResourceCostCalc) -> ResourceCostCalc;
+pub type PotionModifyResultPileFn =
+    for<'a> fn(&RuleCtx<'a>, PotionInstanceId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type PotionDecisionFn = for<'a> fn(&RuleCtx<'a>, PotionInstanceId, &DecisionQuery) -> Decision;
 
 #[derive(Clone)]
@@ -32,6 +36,7 @@ pub struct PotionRules {
     pub modify_block_additive: Option<PotionModifyBlockFn>,
     pub modify_block_multiplicative: Option<PotionModifyBlockFn>,
     pub modify_resource_cost: Option<PotionModifyResourceCostFn>,
+    pub modify_card_play_result_pile: Option<PotionModifyResultPileFn>,
     pub decide: Option<PotionDecisionFn>,
 }
 

@@ -174,6 +174,15 @@ pub struct ModifierLog {
     pub after: Decimal,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardPlayResultPileModifierLog {
+    pub listener: ListenerRef,
+    pub before_pile: PileId,
+    pub after_pile: PileId,
+    pub before_position: PilePosition,
+    pub after_position: PilePosition,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ModifierPhase {
     Additive,

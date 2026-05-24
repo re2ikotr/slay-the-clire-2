@@ -8,8 +8,8 @@ use crate::core::effect::{
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey};
 use crate::core::query::{
-    BlockCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
-    ResourceCostCalc,
+    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind,
+    PreventReason, ResourceCostCalc,
 };
 use crate::core::rules::{prevent_by_current_listener, RuleCtx};
 use crate::core::state::{CardCosts, CardCounter, GameState, PileId, PileKind, ResourceKind};
@@ -22,6 +22,8 @@ pub type CardModifyDamageFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, DamageCal
 pub type CardModifyBlockFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, BlockCalc) -> BlockCalc;
 pub type CardModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, CardInstanceId, ResourceCostCalc) -> ResourceCostCalc;
+pub type CardModifyResultPileFn =
+    for<'a> fn(&RuleCtx<'a>, CardInstanceId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type CardDecisionFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, &DecisionQuery) -> Decision;
 
 #[derive(Clone)]
@@ -68,6 +70,7 @@ pub struct CardRules {
     pub modify_block_additive: Option<CardModifyBlockFn>,
     pub modify_block_multiplicative: Option<CardModifyBlockFn>,
     pub modify_resource_cost: Option<CardModifyResourceCostFn>,
+    pub modify_card_play_result_pile: Option<CardModifyResultPileFn>,
     pub decide: Option<CardDecisionFn>,
 }
 
