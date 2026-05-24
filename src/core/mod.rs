@@ -1,3 +1,4 @@
+mod combat_setup;
 pub mod command;
 pub mod effect;
 pub mod engine;
@@ -11,6 +12,7 @@ pub mod rng;
 pub mod rule_point;
 pub mod rules;
 pub mod state;
+mod state_ops;
 
 pub use command::{Command, CommandError};
 pub use effect::{ChoiceRequest, Effect};
