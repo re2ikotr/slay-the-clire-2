@@ -257,23 +257,14 @@ impl CardPiles {
         }
     }
 
-    pub fn remove(&mut self, card: CardInstanceId) -> Option<PileKind> {
-        for kind in [
-            PileKind::Draw,
-            PileKind::Hand,
-            PileKind::Discard,
-            PileKind::Exhaust,
-            PileKind::Limbo,
-            PileKind::Play,
-            PileKind::Removed,
-        ] {
-            let pile = self.pile_mut(kind);
-            if let Some(index) = pile.iter().position(|existing| *existing == card) {
-                pile.remove(index);
-                return Some(kind);
-            }
+    pub fn remove_from(&mut self, kind: PileKind, card: CardInstanceId) -> bool {
+        let pile = self.pile_mut(kind);
+        if let Some(index) = pile.iter().position(|existing| *existing == card) {
+            pile.remove(index);
+            true
+        } else {
+            false
         }
-        None
     }
 
     pub fn push(&mut self, kind: PileKind, card: CardInstanceId) {
@@ -420,6 +411,10 @@ pub enum StateError {
     UnknownPlayer(PlayerId),
     UnknownCreature(CreatureId),
     UnknownCard(CardInstanceId),
+    CardMissingFromPile {
+        card: CardInstanceId,
+        pile: PileId,
+    },
     InvalidResourceAmount {
         resource: ResourceKind,
         amount: i32,
@@ -439,6 +434,9 @@ impl fmt::Display for StateError {
             Self::UnknownPlayer(player) => write!(f, "unknown player: {:?}", player),
             Self::UnknownCreature(creature) => write!(f, "unknown creature: {:?}", creature),
             Self::UnknownCard(card) => write!(f, "unknown card: {:?}", card),
+            Self::CardMissingFromPile { card, pile } => {
+                write!(f, "card {:?} is missing from pile {:?}", card, pile)
+            }
             Self::InvalidResourceAmount { resource, amount } => {
                 write!(f, "invalid {:?} amount: {amount}", resource)
             }

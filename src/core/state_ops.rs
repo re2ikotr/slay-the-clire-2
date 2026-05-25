@@ -230,7 +230,14 @@ impl GameState {
             return Err(StateError::UnknownPlayer(owner));
         }
 
-        let from = combat.player.piles.remove(card).or(Some(current_pile.kind));
+        if !combat.player.piles.remove_from(current_pile.kind, card) {
+            return Err(StateError::CardMissingFromPile {
+                card,
+                pile: current_pile,
+            });
+        }
+
+        let from = Some(current_pile.kind);
         combat.player.piles.push(to.kind, card);
 
         if let Some(card_state) = combat.cards.get_mut(&card) {
@@ -517,5 +524,34 @@ impl GameState {
             combat.turn_stats.hp_lost_by_player += amount;
             combat.combat_stats.hp_loss_events_by_player += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::ids::CardInstanceId;
+    use crate::core::state::{GameState, PileId, PileKind, StateError};
+
+    #[test]
+    fn move_card_requires_card_to_be_in_recorded_source_pile() {
+        let mut state = GameState::demo_combat(1);
+        let player = state.player_id().unwrap();
+        let card = CardInstanceId::new(1);
+        let hand = PileId::player(player, PileKind::Hand);
+
+        let combat = state.combat_mut().unwrap();
+        combat.player.piles.hand.clear();
+        combat.player.piles.discard.push(card);
+
+        let result = state.move_card(card, PileId::player(player, PileKind::Draw));
+
+        assert_eq!(
+            result,
+            Err(StateError::CardMissingFromPile { card, pile: hand })
+        );
+        let combat = state.combat().unwrap();
+        assert!(combat.player.piles.draw.is_empty());
+        assert_eq!(combat.player.piles.discard, vec![card]);
+        assert_eq!(combat.cards.get(&card).unwrap().pile, hand);
     }
 }
