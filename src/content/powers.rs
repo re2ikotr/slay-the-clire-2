@@ -617,7 +617,6 @@ fn flame_barrier_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Eve
                         kind: DamageKind::Thorns,
                         flags: crate::core::effect::DamageFlags {
                             ignores_block: false,
-                            is_attack: false,
                         },
                     })]
                 })
@@ -667,7 +666,6 @@ fn inferno_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) ->
                     kind: DamageKind::Power,
                     flags: crate::core::effect::DamageFlags {
                         ignores_block: false,
-                        is_attack: false,
                     },
                     hit_count: 1,
                 },
@@ -691,7 +689,6 @@ fn juggernaut_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event)
                 kind: DamageKind::Power,
                 flags: crate::core::effect::DamageFlags {
                     ignores_block: false,
-                    is_attack: false,
                 },
                 hit_count: 1,
             },

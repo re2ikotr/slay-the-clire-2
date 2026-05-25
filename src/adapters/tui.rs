@@ -11,17 +11,16 @@ use crate::adapters::log_store::StepLogSink;
 use crate::assets::{Language, Localization};
 use crate::content::card_text::{describe_card, display_costs, CardTextCtx, CardTextScope};
 use crate::content::cards::TargetType;
-use crate::content::monsters::NIBBIT;
+use crate::content::scenarios;
 use crate::core::ids::{CardInstanceId, CreatureId};
 use crate::core::rules::{RuleCtx, RulePipeline};
 use crate::core::state::{
-    CardCost, CardCosts, CombatPhase, CombatSetupCard, CombatSetupMonster, GameState, PileKind,
-    Side, BASE_HAND_DRAW_COUNT, MAX_CARDS_IN_HAND,
+    CardCost, CardCosts, CombatPhase, PileKind, Side, BASE_HAND_DRAW_COUNT, MAX_CARDS_IN_HAND,
 };
 use crate::core::{Command, Engine, StepResult};
 use crate::registry::StaticRegistry;
 
-const TEST_DECK_SIZE: usize = 25;
+const DEMO_DECK_SIZE: usize = 25;
 const DEFAULT_NIBBIT_COUNT: usize = 3;
 const PLAYER_MAX_HP: i32 = 80;
 const PLAYER_MAX_ENERGY: i32 = 3;
@@ -225,7 +224,7 @@ struct LocalCombatDriver {
 
 impl LocalCombatDriver {
     fn new(registry: StaticRegistry, seed: u64, nibbit_count: usize) -> Self {
-        let engine = build_test_engine(&registry, seed, nibbit_count);
+        let engine = build_demo_engine(&registry, seed, nibbit_count);
         Self {
             registry,
             engine,
@@ -237,7 +236,7 @@ impl LocalCombatDriver {
 
     fn restart(&mut self) {
         self.seed = self.seed.wrapping_add(1);
-        self.engine = build_test_engine(&self.registry, self.seed, self.nibbit_count);
+        self.engine = build_demo_engine(&self.registry, self.seed, self.nibbit_count);
         self.record_note("restart", &format!("seed: {}", self.seed));
     }
 
@@ -326,55 +325,17 @@ fn create_log_sink(session: &str) -> Option<StepLogSink> {
     }
 }
 
-fn build_test_engine(registry: &StaticRegistry, seed: u64, nibbit_count: usize) -> Engine {
-    let deck = random_test_deck(registry, seed, TEST_DECK_SIZE);
-    let monster = registry
-        .monsters
-        .get(NIBBIT)
-        .map(|def| CombatSetupMonster {
-            model: Some(def.id),
-            max_hp: def.max_hp,
-        })
-        .unwrap_or(CombatSetupMonster {
-            model: None,
-            max_hp: 42,
-        });
-    let monsters = std::iter::repeat(monster).take(nibbit_count.max(1));
-    let state = GameState::single_player_test_combat(
+fn build_demo_engine(registry: &StaticRegistry, seed: u64, nibbit_count: usize) -> Engine {
+    let state = scenarios::random_nibbit_combat(
+        registry,
         seed,
-        deck,
-        monsters,
+        nibbit_count,
+        DEMO_DECK_SIZE,
         PLAYER_MAX_HP,
         PLAYER_MAX_ENERGY,
         BASE_HAND_DRAW_COUNT,
     );
     Engine::with_registry(state, registry.clone())
-}
-
-fn random_test_deck(registry: &StaticRegistry, seed: u64, count: usize) -> Vec<CombatSetupCard> {
-    let candidates = registry
-        .cards
-        .values()
-        .filter(|def| def.can_generate_in_combat)
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-
-    let mut rng = crate::core::rng::RngSet::seeded(seed);
-    let mut deck = Vec::with_capacity(count);
-    for _ in 0..count {
-        let Some(index) = rng.combat_card_generation.next_usize(candidates.len()) else {
-            break;
-        };
-        let def = candidates[index];
-        deck.push(CombatSetupCard {
-            def: def.id,
-            upgraded: false,
-            costs: def.costs_for(false),
-        });
-    }
-    deck
 }
 
 fn resolve_target(
@@ -1017,7 +978,7 @@ mod tests {
     #[test]
     fn three_nibbit_test_combat_builds_three_monsters() {
         let registry = StaticRegistry::standard();
-        let engine = build_test_engine(&registry, 7, 3);
+        let engine = build_demo_engine(&registry, 7, 3);
         let loc = Localization::new(Language::Eng);
         let snapshot = CombatSnapshot::from_engine(&engine, &loc);
 
@@ -1032,7 +993,7 @@ mod tests {
     #[test]
     fn dead_non_revivable_monsters_are_hidden_from_snapshot() {
         let registry = StaticRegistry::standard();
-        let mut engine = build_test_engine(&registry, 7, 3);
+        let mut engine = build_demo_engine(&registry, 7, 3);
         let first_monster = engine.state.combat().unwrap().monster_ids()[0];
         engine.state.mark_dead(first_monster).unwrap();
         let loc = Localization::new(Language::Eng);
@@ -1047,7 +1008,7 @@ mod tests {
     fn dead_monsters_that_prevent_removal_stay_in_snapshot() {
         let mut registry = StaticRegistry::standard();
         registry.powers.register(retain_after_death_def());
-        let mut engine = build_test_engine(&registry, 7, 2);
+        let mut engine = build_demo_engine(&registry, 7, 2);
         let first_monster = engine.state.combat().unwrap().monster_ids()[0];
         engine
             .state

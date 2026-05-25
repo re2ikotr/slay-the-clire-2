@@ -2688,7 +2688,6 @@ fn attack_effects(
                 kind: DamageKind::Attack,
                 flags: DamageFlags {
                     ignores_block: false,
-                    is_attack: true,
                 },
             })
         })
@@ -2708,7 +2707,6 @@ fn all_enemy_attack(
         kind: DamageKind::Attack,
         flags: DamageFlags {
             ignores_block: false,
-            is_attack: true,
         },
         hit_count,
     })
@@ -2727,7 +2725,6 @@ fn random_enemy_attack(
         kind: DamageKind::Attack,
         flags: DamageFlags {
             ignores_block: false,
-            is_attack: true,
         },
         hit_count,
     })

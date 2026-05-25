@@ -1,12 +1,13 @@
 use crate::adapters::log_store::StepLogSink;
 use crate::content::cards::{DEFEND_IRONCLAD, STRIKE_IRONCLAD};
 use crate::content::monsters::MonsterIntent;
+use crate::content::scenarios;
 use crate::core::ids::{CardInstanceId, CreatureId};
 use crate::core::rules::RuleCtx;
-use crate::core::{CombatPhase, Command, Engine, GameState, Side, StepResult};
+use crate::core::{CombatPhase, Command, Engine, Side, StepResult};
 
 pub fn run() {
-    let mut engine = Engine::new(GameState::full_nibbit_combat(0));
+    let mut engine = Engine::new(scenarios::full_nibbit_combat(0));
     let mut log_sink = create_log_sink("smoke");
     let player = engine.state.player_id().expect("demo combat has a player");
     let enemy = engine

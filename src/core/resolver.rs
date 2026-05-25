@@ -1605,7 +1605,6 @@ mod tests {
             kind: DamageKind::Attack,
             flags: DamageFlags {
                 ignores_block: false,
-                is_attack: true,
             },
         })]
     }
@@ -1701,7 +1700,6 @@ mod tests {
             kind: DamageKind::Attack,
             flags: DamageFlags {
                 ignores_block: false,
-                is_attack: true,
             },
         }));
         resolver.enqueue(Effect::CheckCombatEnd);
@@ -1730,7 +1728,6 @@ mod tests {
             kind: DamageKind::Attack,
             flags: DamageFlags {
                 ignores_block: false,
-                is_attack: true,
             },
         }));
         resolver.enqueue(Effect::CheckCombatEnd);
@@ -1893,7 +1890,6 @@ mod tests {
             kind: DamageKind::Attack,
             flags: DamageFlags {
                 ignores_block: false,
-                is_attack: true,
             },
         }));
 

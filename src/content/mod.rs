@@ -5,3 +5,4 @@ pub mod monsters;
 pub mod potions;
 pub mod powers;
 pub mod relics;
+pub mod scenarios;

@@ -117,7 +117,6 @@ fn nibbit_damage(monster: CreatureId, player: CreatureId, amount: i32) -> Effect
         kind: DamageKind::Attack,
         flags: DamageFlags {
             ignores_block: false,
-            is_attack: true,
         },
     })
 }

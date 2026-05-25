@@ -14,6 +14,7 @@ pub mod rules;
 pub mod state;
 mod state_ops;
 
+pub(crate) use combat_setup::build_single_player_combat;
 pub use command::{Command, CommandError};
 pub use effect::{ChoiceRequest, Effect};
 pub use engine::{CombatOutcome, CombatResult, Engine, StepResult};

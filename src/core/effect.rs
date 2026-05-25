@@ -182,7 +182,6 @@ pub enum DamageKind {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DamageFlags {
     pub ignores_block: bool,
-    pub is_attack: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
