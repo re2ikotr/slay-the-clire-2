@@ -5,7 +5,9 @@ use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{CreatureId, LocKey, MonsterId};
 use crate::core::query::{
-    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc,
+    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, HpLossCalc,
+    OrbPassiveTriggerCountCalc, OrbValueCalc, PowerAmountCalc, ResourceCostCalc, SummonAmountCalc,
+    UnblockedDamageTargetCalc,
 };
 use crate::core::rules::RuleCtx;
 
@@ -14,11 +16,22 @@ pub type MonsterActFn = for<'a> fn(&RuleCtx<'a>, CreatureId) -> Vec<Effect>;
 pub type MonsterEventFn = for<'a> fn(&RuleCtx<'a>, CreatureId, &Event) -> Vec<Effect>;
 pub type MonsterModifyDamageFn = for<'a> fn(&RuleCtx<'a>, CreatureId, DamageCalc) -> DamageCalc;
 pub type MonsterModifyBlockFn = for<'a> fn(&RuleCtx<'a>, CreatureId, BlockCalc) -> BlockCalc;
+pub type MonsterModifyHpLossFn = for<'a> fn(&RuleCtx<'a>, CreatureId, HpLossCalc) -> HpLossCalc;
+pub type MonsterModifyUnblockedDamageTargetFn =
+    for<'a> fn(&RuleCtx<'a>, CreatureId, UnblockedDamageTargetCalc) -> UnblockedDamageTargetCalc;
 pub type MonsterModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, CreatureId, ResourceCostCalc) -> ResourceCostCalc;
 pub type MonsterModifyResultPileFn =
     for<'a> fn(&RuleCtx<'a>, CreatureId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type MonsterDecisionFn = for<'a> fn(&RuleCtx<'a>, CreatureId, &DecisionQuery) -> Decision;
+pub type MonsterModifyPowerAmountFn =
+    for<'a> fn(&RuleCtx<'a>, CreatureId, PowerAmountCalc) -> PowerAmountCalc;
+pub type MonsterModifyOrbPassiveCountFn =
+    for<'a> fn(&RuleCtx<'a>, CreatureId, OrbPassiveTriggerCountCalc) -> OrbPassiveTriggerCountCalc;
+pub type MonsterModifyOrbValueFn =
+    for<'a> fn(&RuleCtx<'a>, CreatureId, OrbValueCalc) -> OrbValueCalc;
+pub type MonsterModifySummonAmountFn =
+    for<'a> fn(&RuleCtx<'a>, CreatureId, SummonAmountCalc) -> SummonAmountCalc;
 
 #[derive(Clone)]
 pub struct MonsterDef {
@@ -38,8 +51,14 @@ pub struct MonsterRules {
     pub modify_damage_cap: Option<MonsterModifyDamageFn>,
     pub modify_block_additive: Option<MonsterModifyBlockFn>,
     pub modify_block_multiplicative: Option<MonsterModifyBlockFn>,
+    pub modify_hp_loss: Option<MonsterModifyHpLossFn>,
+    pub modify_unblocked_damage_target: Option<MonsterModifyUnblockedDamageTargetFn>,
     pub modify_resource_cost: Option<MonsterModifyResourceCostFn>,
     pub modify_card_play_result_pile: Option<MonsterModifyResultPileFn>,
+    pub modify_power_amount: Option<MonsterModifyPowerAmountFn>,
+    pub modify_orb_passive_trigger_count: Option<MonsterModifyOrbPassiveCountFn>,
+    pub modify_orb_value: Option<MonsterModifyOrbValueFn>,
+    pub modify_summon_amount: Option<MonsterModifySummonAmountFn>,
     pub decide: Option<MonsterDecisionFn>,
 }
 

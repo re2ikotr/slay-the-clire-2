@@ -12,8 +12,8 @@ use crate::core::rng::RngSet;
 use crate::core::state::CardCosts;
 use crate::core::state::{
     CardFlags, CardInstance, CardPiles, CombatPhase, CombatSetupCard, CombatSetupMonster,
-    CombatState, CombatStats, CombatTurnStats, Creature, GameState, PileId, PileKind, PlayerState,
-    RunState, Side, TemporaryCardCosts, MAX_CARDS_IN_HAND,
+    CombatState, CombatStats, CombatTurnStats, Creature, GameState, OrbQueue, PileId, PileKind,
+    PlayerState, RunState, Side, TemporaryCardCosts, MAX_CARDS_IN_HAND,
 };
 
 pub(crate) fn build_single_player_combat(
@@ -91,6 +91,7 @@ pub(crate) fn build_single_player_combat(
             energy: player_max_energy,
             max_energy: player_max_energy,
             stars: 0,
+            orb_queue: OrbQueue::default(),
             relics: Vec::new(),
             potions: Vec::new(),
             piles,
@@ -98,6 +99,7 @@ pub(crate) fn build_single_player_combat(
         creatures,
         cards,
         powers: BTreeMap::new(),
+        orbs: BTreeMap::new(),
         relics: BTreeMap::new(),
         potions: BTreeMap::new(),
         modifiers: Vec::new(),
@@ -105,6 +107,7 @@ pub(crate) fn build_single_player_combat(
         combat_stats: CombatStats::default(),
         next_card_instance,
         next_power_instance: 1,
+        next_orb_instance: 1,
     };
 
     GameState {
@@ -169,6 +172,7 @@ impl GameState {
                 energy: 3,
                 max_energy: 3,
                 stars: 0,
+                orb_queue: OrbQueue::default(),
                 relics: Vec::new(),
                 potions: Vec::new(),
                 piles,
@@ -179,6 +183,7 @@ impl GameState {
             ],
             cards,
             powers: BTreeMap::new(),
+            orbs: BTreeMap::new(),
             relics: BTreeMap::new(),
             potions: BTreeMap::new(),
             modifiers: Vec::new(),
@@ -186,6 +191,7 @@ impl GameState {
             combat_stats: CombatStats::default(),
             next_card_instance: 2,
             next_power_instance: 1,
+            next_orb_instance: 1,
         };
 
         Self::with_combat(seed, combat)
@@ -241,6 +247,7 @@ impl GameState {
                 energy: 3,
                 max_energy: 3,
                 stars: 0,
+                orb_queue: OrbQueue::default(),
                 relics: Vec::new(),
                 potions: Vec::new(),
                 piles,
@@ -251,6 +258,7 @@ impl GameState {
             ],
             cards,
             powers: BTreeMap::new(),
+            orbs: BTreeMap::new(),
             relics: BTreeMap::new(),
             potions: BTreeMap::new(),
             modifiers: Vec::new(),
@@ -258,6 +266,7 @@ impl GameState {
             combat_stats: CombatStats::default(),
             next_card_instance: 3,
             next_power_instance: 1,
+            next_orb_instance: 1,
         };
 
         Self::with_combat(seed, combat)
@@ -329,6 +338,7 @@ impl GameState {
                 energy: 3,
                 max_energy: 3,
                 stars: 0,
+                orb_queue: OrbQueue::default(),
                 relics: Vec::new(),
                 potions: Vec::new(),
                 piles,
@@ -339,6 +349,7 @@ impl GameState {
             ],
             cards,
             powers: BTreeMap::new(),
+            orbs: BTreeMap::new(),
             relics: BTreeMap::new(),
             potions: BTreeMap::new(),
             modifiers: Vec::new(),
@@ -346,6 +357,7 @@ impl GameState {
             combat_stats: CombatStats::default(),
             next_card_instance: 10,
             next_power_instance: 1,
+            next_orb_instance: 1,
         };
 
         Self {

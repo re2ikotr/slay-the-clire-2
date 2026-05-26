@@ -3,8 +3,8 @@ use rust_decimal::Decimal;
 use crate::content::cards::{CardType, TargetType};
 use crate::core::event::Event;
 use crate::core::ids::{
-    CardId, CardInstanceId, ChoiceId, CreatureId, LocKey, PlayerId, PotionInstanceId, PowerId,
-    PowerInstanceId, RelicInstanceId,
+    CardId, CardInstanceId, ChoiceId, CreatureId, LocKey, OrbId, OrbInstanceId, PlayerId,
+    PotionInstanceId, PowerId, PowerInstanceId, RelicInstanceId,
 };
 use crate::core::state::{CardCounter, CombatPhase, PileId, ResourceKind, Side};
 
@@ -81,6 +81,11 @@ pub enum Effect {
         amount: Decimal,
         source: Option<Source>,
     },
+    AddPowerAmount {
+        power: PowerInstanceId,
+        amount: Decimal,
+        source: Option<Source>,
+    },
     RemovePower {
         power: PowerInstanceId,
     },
@@ -97,6 +102,13 @@ pub enum Effect {
     },
     DiscardHand {
         player: PlayerId,
+        kind: DiscardKind,
+    },
+    DiscardCards {
+        player: PlayerId,
+        cards: Vec<CardInstanceId>,
+        kind: DiscardKind,
+        then_draw: u8,
     },
     ExhaustCard {
         card: CardInstanceId,
@@ -144,6 +156,39 @@ pub enum Effect {
         count: u8,
         exhaust_after_play: bool,
     },
+    AddOrbSlots {
+        player: PlayerId,
+        amount: u8,
+    },
+    RemoveOrbSlots {
+        player: PlayerId,
+        amount: u8,
+    },
+    ChannelOrb {
+        player: PlayerId,
+        orb: OrbId,
+        source: Option<Source>,
+    },
+    EvokeOrb {
+        player: PlayerId,
+        target: OrbSelection,
+        remove: bool,
+        source: Option<Source>,
+    },
+    TriggerOrbPassive {
+        orb: OrbInstanceId,
+        trigger: OrbTrigger,
+        target: Option<CreatureId>,
+    },
+    SummonOsty {
+        player: PlayerId,
+        amount: Decimal,
+        source: Option<Source>,
+    },
+    KillCreature {
+        creature: CreatureId,
+        source: Option<Source>,
+    },
     ClearSideBlock(Side),
     ExecuteMonsterTurn,
     MoveCard {
@@ -177,6 +222,12 @@ pub enum Source {
     Potion(PotionInstanceId),
     Creature(CreatureId),
     System,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardKind {
+    Manual,
+    EndOfTurn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +283,19 @@ pub struct DamageResult {
     pub requested: Decimal,
     pub blocked: i32,
     pub hp_loss: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrbSelection {
+    First,
+    Last,
+    Exact(OrbInstanceId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrbTrigger {
+    AfterTurnStart,
+    BeforeTurnEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

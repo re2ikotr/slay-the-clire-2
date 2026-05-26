@@ -36,4 +36,9 @@ pub enum QueryRulePoint {
     ModifyHpLostBeforeRedirect,
     ModifyUnblockedDamageTarget,
     ModifyHpLostAfterRedirect,
+    ModifyPowerAmountGiven,
+    ModifyPowerAmountReceived,
+    ModifyOrbPassiveTriggerCount,
+    ModifyOrbValue,
+    ModifySummonAmount,
 }

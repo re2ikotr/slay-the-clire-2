@@ -1,7 +1,7 @@
 use crate::core::effect::{DamageResult, Effect, MoveReason};
 use crate::core::engine::CombatResult;
 use crate::core::event::Event;
-use crate::core::ids::{CardInstanceId, CreatureId, PlayerId, PowerInstanceId};
+use crate::core::ids::{CardInstanceId, CreatureId, OrbInstanceId, PlayerId, PowerInstanceId};
 use crate::core::query::{CardPlayResultPileModifierLog, Decision, ModifierLog};
 use crate::core::state::{CardCounter, PileId, ResourceKind, StateError};
 
@@ -58,6 +58,17 @@ pub enum StateChange {
     },
     PowerRemoved {
         power: PowerInstanceId,
+    },
+    OrbSlotCountChanged {
+        player: PlayerId,
+        slots: u8,
+    },
+    OrbChanneled {
+        orb: OrbInstanceId,
+    },
+    OrbEvoked {
+        orb: OrbInstanceId,
+        removed: bool,
     },
     CardUpgraded {
         card: CardInstanceId,

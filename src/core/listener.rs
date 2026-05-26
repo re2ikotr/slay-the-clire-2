@@ -112,6 +112,16 @@ pub fn collect_combat_listeners(state: &GameState, scope: ListenerScope) -> Vec<
             .map(ListenerRef::Potion)
             .filter(|listener| listener_is_in_scope(combat, *listener, &scope)),
     );
+    out.extend(
+        combat
+            .player
+            .orb_queue
+            .orbs
+            .iter()
+            .copied()
+            .map(ListenerRef::Orb)
+            .filter(|listener| listener_is_in_scope(combat, *listener, &scope)),
+    );
 
     let cards = combat.player.piles.all_cards_in_pile_order();
     out.extend(
@@ -175,7 +185,17 @@ fn listener_is_in_scope(
             .unwrap_or(false),
         ListenerRef::Monster(id) => scope.creatures.contains(&id),
         ListenerRef::Relic(_) | ListenerRef::Potion(_) => scope.include_player_inventory,
-        ListenerRef::Orb(_) => false,
+        ListenerRef::Orb(id) => {
+            scope.include_player_inventory
+                && combat
+                    .orbs
+                    .get(&id)
+                    .map(|orb| {
+                        orb.owner == combat.player.id
+                            && scope.creatures.contains(&combat.player.creature)
+                    })
+                    .unwrap_or(false)
+        }
         ListenerRef::Card(id) | ListenerRef::Affliction(id) | ListenerRef::Enchantment(id) => {
             match scope.cards {
                 CardListenerScope::All => true,

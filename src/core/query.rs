@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 
-use crate::core::effect::{DamageKind, Source};
-use crate::core::ids::{CardInstanceId, CreatureId, PlayerId};
+use crate::core::effect::{DamageKind, OrbTrigger, Source};
+use crate::core::ids::{CardInstanceId, CreatureId, OrbInstanceId, PlayerId, PowerId};
 use crate::core::listener::ListenerRef;
 use crate::core::state::{PileId, ResourceKind, Side};
 
@@ -15,6 +15,10 @@ pub enum Query {
     ModifyHandDraw(HandDrawCalc),
     ModifyHpLoss(HpLossCalc),
     ModifyUnblockedDamageTarget(UnblockedDamageTargetCalc),
+    ModifyPowerAmount(PowerAmountCalc),
+    ModifyOrbPassiveTriggerCount(OrbPassiveTriggerCountCalc),
+    ModifyOrbValue(OrbValueCalc),
+    ModifySummonAmount(SummonAmountCalc),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +105,55 @@ pub struct UnblockedDamageTargetCalc {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PowerAmountCalc {
+    pub source: Option<Source>,
+    pub giver: Option<CreatureId>,
+    pub target: CreatureId,
+    pub power: PowerId,
+    pub base_amount: Decimal,
+    pub amount: Decimal,
+    pub phase: PowerAmountPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerAmountPhase {
+    Given,
+    Received,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrbPassiveTriggerCountCalc {
+    pub player: PlayerId,
+    pub orb: OrbInstanceId,
+    pub trigger: OrbTrigger,
+    pub base_count: i32,
+    pub count: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrbValueCalc {
+    pub player: PlayerId,
+    pub orb: OrbInstanceId,
+    pub base_amount: Decimal,
+    pub amount: Decimal,
+    pub kind: OrbValueKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrbValueKind {
+    Passive,
+    Evoke,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SummonAmountCalc {
+    pub player: PlayerId,
+    pub source: Option<Source>,
+    pub base_amount: Decimal,
+    pub amount: Decimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecisionQuery {
     pub kind: DecisionQueryKind,
     pub source: Option<Source>,
@@ -126,9 +179,6 @@ pub enum DecisionQueryKind {
         creature: CreatureId,
     },
     ShouldFlush {
-        player: PlayerId,
-    },
-    ShouldPayExcessEnergyCostWithStars {
         player: PlayerId,
     },
     ShouldStopCombatFromEnding,

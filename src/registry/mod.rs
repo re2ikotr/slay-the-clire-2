@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use crate::content::cards::CardDef;
 use crate::content::monsters::MonsterDef;
+use crate::content::orbs::OrbDef;
 use crate::content::potions::PotionDef;
 use crate::content::powers::PowerDef;
 use crate::content::relics::RelicDef;
-use crate::core::ids::{CardId, MonsterId, PotionId, PowerId, RelicId};
+use crate::core::ids::{CardId, MonsterId, OrbId, PotionId, PowerId, RelicId};
 
 pub trait RegistryDef {
     type Id: Copy + Ord;
@@ -112,12 +113,21 @@ impl RegistryDef for MonsterDef {
     }
 }
 
+impl RegistryDef for OrbDef {
+    type Id = OrbId;
+
+    fn registry_id(&self) -> Self::Id {
+        self.id
+    }
+}
+
 pub struct StaticRegistry {
     pub cards: DefRegistry<CardId, CardDef>,
     pub powers: DefRegistry<PowerId, PowerDef>,
     pub relics: DefRegistry<RelicId, RelicDef>,
     pub potions: DefRegistry<PotionId, PotionDef>,
     pub monsters: DefRegistry<MonsterId, MonsterDef>,
+    pub orbs: DefRegistry<OrbId, OrbDef>,
 }
 
 impl Clone for StaticRegistry {
@@ -128,6 +138,7 @@ impl Clone for StaticRegistry {
             relics: self.relics.clone(),
             potions: self.potions.clone(),
             monsters: self.monsters.clone(),
+            orbs: self.orbs.clone(),
         }
     }
 }
@@ -140,6 +151,7 @@ impl StaticRegistry {
             relics: DefRegistry::default(),
             potions: DefRegistry::default(),
             monsters: DefRegistry::default(),
+            orbs: DefRegistry::default(),
         }
     }
 
@@ -147,6 +159,7 @@ impl StaticRegistry {
         let mut registry = Self::empty();
         crate::content::cards::register_all_cards(&mut registry.cards);
         crate::content::powers::register_core_powers(&mut registry.powers);
+        crate::content::orbs::register_core_orbs(&mut registry.orbs);
         registry
             .monsters
             .register(crate::content::monsters::nibbit());

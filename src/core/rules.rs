@@ -2,18 +2,22 @@ use rust_decimal::Decimal;
 
 use crate::content::cards::CardRules;
 use crate::content::monsters::MonsterRules;
+use crate::content::orbs::OrbRules;
 use crate::content::potions::PotionRules;
 use crate::content::powers::PowerRules;
 use crate::content::relics::RelicRules;
 use crate::core::effect::{Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{
-    CardInstanceId, CreatureId, PlayerId, PotionInstanceId, PowerInstanceId, RelicInstanceId,
+    CardInstanceId, CreatureId, OrbInstanceId, PlayerId, PotionInstanceId, PowerInstanceId,
+    RelicInstanceId,
 };
 use crate::core::listener::{collect_combat_listeners, ListenerRef, ListenerScope};
 use crate::core::query::{
     BlockCalc, CardPlayResultPileCalc, CardPlayResultPileModifierLog, DamageCalc, Decision,
-    DecisionQuery, DecisionQueryKind, ModifierLog, ModifierPhase, PreventReason, ResourceCostCalc,
+    DecisionQuery, DecisionQueryKind, HpLossCalc, ModifierLog, ModifierPhase,
+    OrbPassiveTriggerCountCalc, OrbValueCalc, PowerAmountCalc, PreventReason, ResourceCostCalc,
+    SummonAmountCalc, UnblockedDamageTargetCalc,
 };
 use crate::core::state::GameState;
 use crate::registry::StaticRegistry;
@@ -106,6 +110,67 @@ impl RulePipeline {
         (calc, logs)
     }
 
+    pub fn modify_hp_loss(
+        registry: &StaticRegistry,
+        state: &GameState,
+        calc: HpLossCalc,
+    ) -> (HpLossCalc, Vec<ModifierLog>) {
+        let listeners = collect_combat_listeners(state, hp_loss_listener_scope(&calc));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before = calc.amount;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_hp_loss(registry, state, listener, &ctx, calc);
+            if calc.amount != before {
+                logs.push(ModifierLog {
+                    listener,
+                    phase: ModifierPhase::Replacement,
+                    before,
+                    after: calc.amount,
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
+    pub fn modify_unblocked_damage_target(
+        registry: &StaticRegistry,
+        state: &GameState,
+        calc: UnblockedDamageTargetCalc,
+    ) -> (UnblockedDamageTargetCalc, Vec<ModifierLog>) {
+        let listeners = collect_combat_listeners(state, unblocked_target_listener_scope(&calc));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before = Decimal::from(calc.target.get());
+            let before_target = calc.target;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_unblocked_damage_target(registry, state, listener, &ctx, calc);
+            if calc.target != before_target {
+                logs.push(ModifierLog {
+                    listener,
+                    phase: ModifierPhase::Replacement,
+                    before,
+                    after: Decimal::from(calc.target.get()),
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
     pub fn modify_resource_cost(
         registry: &StaticRegistry,
         state: &GameState,
@@ -162,6 +227,126 @@ impl RulePipeline {
                     after_pile: calc.pile,
                     before_position,
                     after_position: calc.position,
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
+    pub fn modify_power_amount(
+        registry: &StaticRegistry,
+        state: &GameState,
+        calc: PowerAmountCalc,
+    ) -> (PowerAmountCalc, Vec<ModifierLog>) {
+        let listeners = collect_combat_listeners(state, power_amount_listener_scope(&calc));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before = calc.amount;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_power_amount(registry, state, listener, &ctx, calc);
+            if calc.amount != before {
+                logs.push(ModifierLog {
+                    listener,
+                    phase: ModifierPhase::Replacement,
+                    before,
+                    after: calc.amount,
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
+    pub fn modify_orb_passive_trigger_count(
+        registry: &StaticRegistry,
+        state: &GameState,
+        calc: OrbPassiveTriggerCountCalc,
+    ) -> (OrbPassiveTriggerCountCalc, Vec<ModifierLog>) {
+        let listeners = collect_combat_listeners(state, player_listener_scope(state, calc.player));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before = calc.count;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_orb_passive_trigger_count(registry, state, listener, &ctx, calc);
+            if calc.count != before {
+                logs.push(ModifierLog {
+                    listener,
+                    phase: ModifierPhase::Replacement,
+                    before: Decimal::from(before),
+                    after: Decimal::from(calc.count),
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
+    pub fn modify_orb_value(
+        registry: &StaticRegistry,
+        state: &GameState,
+        calc: OrbValueCalc,
+    ) -> (OrbValueCalc, Vec<ModifierLog>) {
+        let listeners = collect_combat_listeners(state, player_listener_scope(state, calc.player));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before = calc.amount;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_orb_value(registry, state, listener, &ctx, calc);
+            if calc.amount != before {
+                logs.push(ModifierLog {
+                    listener,
+                    phase: ModifierPhase::Replacement,
+                    before,
+                    after: calc.amount,
+                });
+            }
+        }
+
+        (calc, logs)
+    }
+
+    pub fn modify_summon_amount(
+        registry: &StaticRegistry,
+        state: &GameState,
+        calc: SummonAmountCalc,
+    ) -> (SummonAmountCalc, Vec<ModifierLog>) {
+        let listeners = collect_combat_listeners(state, player_listener_scope(state, calc.player));
+        let mut calc = calc;
+        let mut logs = Vec::new();
+
+        for listener in listeners {
+            let before = calc.amount;
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(listener),
+            };
+            calc = dispatch_modify_summon_amount(registry, state, listener, &ctx, calc);
+            if calc.amount != before {
+                logs.push(ModifierLog {
+                    listener,
+                    phase: ModifierPhase::Replacement,
+                    before,
+                    after: calc.amount,
                 });
             }
         }
@@ -316,6 +501,30 @@ fn dispatch_modify_block(
         .unwrap_or(calc)
 }
 
+fn dispatch_modify_hp_loss(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: HpLossCalc,
+) -> HpLossCalc {
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_hp_loss(ctx, calc.clone()))
+        .unwrap_or(calc)
+}
+
+fn dispatch_modify_unblocked_damage_target(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: UnblockedDamageTargetCalc,
+) -> UnblockedDamageTargetCalc {
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_unblocked_damage_target(ctx, calc.clone()))
+        .unwrap_or(calc)
+}
+
 fn dispatch_modify_resource_cost(
     registry: &StaticRegistry,
     state: &GameState,
@@ -340,6 +549,54 @@ fn dispatch_modify_card_play_result_pile(
         .unwrap_or(calc)
 }
 
+fn dispatch_modify_power_amount(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: PowerAmountCalc,
+) -> PowerAmountCalc {
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_power_amount(ctx, calc.clone()))
+        .unwrap_or(calc)
+}
+
+fn dispatch_modify_orb_passive_trigger_count(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: OrbPassiveTriggerCountCalc,
+) -> OrbPassiveTriggerCountCalc {
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_orb_passive_trigger_count(ctx, calc.clone()))
+        .unwrap_or(calc)
+}
+
+fn dispatch_modify_orb_value(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: OrbValueCalc,
+) -> OrbValueCalc {
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_orb_value(ctx, calc.clone()))
+        .unwrap_or(calc)
+}
+
+fn dispatch_modify_summon_amount(
+    registry: &StaticRegistry,
+    state: &GameState,
+    listener: ListenerRef,
+    ctx: &RuleCtx<'_>,
+    calc: SummonAmountCalc,
+) -> SummonAmountCalc {
+    ListenerRulesRef::for_listener(registry, state, listener)
+        .map(|rules| rules.dispatch_modify_summon_amount(ctx, calc.clone()))
+        .unwrap_or(calc)
+}
+
 fn dispatch_decision(
     registry: &StaticRegistry,
     state: &GameState,
@@ -357,6 +614,7 @@ enum ListenerRulesRef<'a> {
     Power(PowerInstanceId, &'a PowerRules),
     Relic(RelicInstanceId, &'a RelicRules),
     Potion(PotionInstanceId, &'a PotionRules),
+    Orb(OrbInstanceId, &'a OrbRules),
     Monster(CreatureId, &'a MonsterRules),
     Card(CardInstanceId, &'a CardRules),
 }
@@ -389,6 +647,13 @@ impl<'a> ListenerRulesRef<'a> {
                     .and_then(|instance| registry.potions.get(instance.def))?;
                 Some(Self::Potion(id, &def.rules))
             }
+            ListenerRef::Orb(id) => {
+                let def = state
+                    .combat()
+                    .and_then(|combat| combat.orbs.get(&id))
+                    .and_then(|instance| registry.orbs.get(instance.def))?;
+                Some(Self::Orb(id, &def.rules))
+            }
             ListenerRef::Monster(id) => {
                 let def = state
                     .creature(id)
@@ -400,7 +665,7 @@ impl<'a> ListenerRulesRef<'a> {
                 let def = card_def(registry, state, id)?;
                 Some(Self::Card(id, &def.rules))
             }
-            ListenerRef::Orb(_) | ListenerRef::Modifier(_) => None,
+            ListenerRef::Modifier(_) => None,
         }
     }
 
@@ -409,6 +674,7 @@ impl<'a> ListenerRulesRef<'a> {
             Self::Power(id, rules) => apply_event(ctx, id, rules.on_event, event),
             Self::Relic(id, rules) => apply_event(ctx, id, rules.on_event, event),
             Self::Potion(id, rules) => apply_event(ctx, id, rules.on_event, event),
+            Self::Orb(_, _) => Vec::new(),
             Self::Monster(id, rules) => apply_event(ctx, id, rules.on_event, event),
             Self::Card(id, rules) => apply_event(ctx, id, rules.on_event, event),
         }
@@ -424,6 +690,7 @@ impl<'a> ListenerRulesRef<'a> {
             Self::Power(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
             Self::Relic(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
             Self::Potion(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
+            Self::Orb(_, _) => calc,
             Self::Monster(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
             Self::Card(id, rules) => apply_calc(ctx, id, rules.damage_rule(phase), calc),
         }
@@ -439,8 +706,45 @@ impl<'a> ListenerRulesRef<'a> {
             Self::Power(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
             Self::Relic(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
             Self::Potion(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+            Self::Orb(_, _) => calc,
             Self::Monster(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
             Self::Card(id, rules) => apply_calc(ctx, id, rules.block_rule(phase), calc),
+        }
+    }
+
+    fn dispatch_modify_hp_loss(self, ctx: &RuleCtx<'_>, calc: HpLossCalc) -> HpLossCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_hp_loss, calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_hp_loss, calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.modify_hp_loss, calc),
+            Self::Orb(_, _) => calc,
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.modify_hp_loss, calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_hp_loss, calc),
+        }
+    }
+
+    fn dispatch_modify_unblocked_damage_target(
+        self,
+        ctx: &RuleCtx<'_>,
+        calc: UnblockedDamageTargetCalc,
+    ) -> UnblockedDamageTargetCalc {
+        match self {
+            Self::Power(id, rules) => {
+                apply_calc(ctx, id, rules.modify_unblocked_damage_target, calc)
+            }
+            Self::Relic(id, rules) => {
+                apply_calc(ctx, id, rules.modify_unblocked_damage_target, calc)
+            }
+            Self::Potion(id, rules) => {
+                apply_calc(ctx, id, rules.modify_unblocked_damage_target, calc)
+            }
+            Self::Orb(_, _) => calc,
+            Self::Monster(id, rules) => {
+                apply_calc(ctx, id, rules.modify_unblocked_damage_target, calc)
+            }
+            Self::Card(id, rules) => {
+                apply_calc(ctx, id, rules.modify_unblocked_damage_target, calc)
+            }
         }
     }
 
@@ -453,6 +757,7 @@ impl<'a> ListenerRulesRef<'a> {
             Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
             Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
             Self::Potion(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
+            Self::Orb(_, _) => calc,
             Self::Monster(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
             Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_resource_cost, calc),
         }
@@ -469,10 +774,79 @@ impl<'a> ListenerRulesRef<'a> {
             Self::Potion(id, rules) => {
                 apply_calc(ctx, id, rules.modify_card_play_result_pile, calc)
             }
+            Self::Orb(_, _) => calc,
             Self::Monster(id, rules) => {
                 apply_calc(ctx, id, rules.modify_card_play_result_pile, calc)
             }
             Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_card_play_result_pile, calc),
+        }
+    }
+
+    fn dispatch_modify_power_amount(
+        self,
+        ctx: &RuleCtx<'_>,
+        calc: PowerAmountCalc,
+    ) -> PowerAmountCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_power_amount, calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_power_amount, calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.modify_power_amount, calc),
+            Self::Orb(id, rules) => apply_calc(ctx, id, rules.modify_power_amount, calc),
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.modify_power_amount, calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_power_amount, calc),
+        }
+    }
+
+    fn dispatch_modify_orb_passive_trigger_count(
+        self,
+        ctx: &RuleCtx<'_>,
+        calc: OrbPassiveTriggerCountCalc,
+    ) -> OrbPassiveTriggerCountCalc {
+        match self {
+            Self::Power(id, rules) => {
+                apply_calc(ctx, id, rules.modify_orb_passive_trigger_count, calc)
+            }
+            Self::Relic(id, rules) => {
+                apply_calc(ctx, id, rules.modify_orb_passive_trigger_count, calc)
+            }
+            Self::Potion(id, rules) => {
+                apply_calc(ctx, id, rules.modify_orb_passive_trigger_count, calc)
+            }
+            Self::Orb(id, rules) => {
+                apply_calc(ctx, id, rules.modify_orb_passive_trigger_count, calc)
+            }
+            Self::Monster(id, rules) => {
+                apply_calc(ctx, id, rules.modify_orb_passive_trigger_count, calc)
+            }
+            Self::Card(id, rules) => {
+                apply_calc(ctx, id, rules.modify_orb_passive_trigger_count, calc)
+            }
+        }
+    }
+
+    fn dispatch_modify_orb_value(self, ctx: &RuleCtx<'_>, calc: OrbValueCalc) -> OrbValueCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_orb_value, calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_orb_value, calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.modify_orb_value, calc),
+            Self::Orb(id, rules) => apply_calc(ctx, id, rules.modify_orb_value, calc),
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.modify_orb_value, calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_orb_value, calc),
+        }
+    }
+
+    fn dispatch_modify_summon_amount(
+        self,
+        ctx: &RuleCtx<'_>,
+        calc: SummonAmountCalc,
+    ) -> SummonAmountCalc {
+        match self {
+            Self::Power(id, rules) => apply_calc(ctx, id, rules.modify_summon_amount, calc),
+            Self::Relic(id, rules) => apply_calc(ctx, id, rules.modify_summon_amount, calc),
+            Self::Potion(id, rules) => apply_calc(ctx, id, rules.modify_summon_amount, calc),
+            Self::Orb(id, rules) => apply_calc(ctx, id, rules.modify_summon_amount, calc),
+            Self::Monster(id, rules) => apply_calc(ctx, id, rules.modify_summon_amount, calc),
+            Self::Card(id, rules) => apply_calc(ctx, id, rules.modify_summon_amount, calc),
         }
     }
 
@@ -481,6 +855,7 @@ impl<'a> ListenerRulesRef<'a> {
             Self::Power(id, rules) => apply_decision(ctx, id, rules.decide, query),
             Self::Relic(id, rules) => apply_decision(ctx, id, rules.decide, query),
             Self::Potion(id, rules) => apply_decision(ctx, id, rules.decide, query),
+            Self::Orb(_, _) => Decision::Allow,
             Self::Monster(id, rules) => apply_decision(ctx, id, rules.decide, query),
             Self::Card(id, rules) => apply_decision(ctx, id, rules.decide, query),
         }
@@ -604,6 +979,7 @@ fn event_listener_scope(event: &Event) -> ListenerScope {
         | Event::TurnEnded { .. }
         | Event::CardsShuffled(_)
         | Event::CardDrawn(_)
+        | Event::CardDiscarded(_)
         | Event::CardExhausted(_)
         | Event::CardUpgraded(_)
         | Event::CardPlayStarted(_)
@@ -611,8 +987,12 @@ fn event_listener_scope(event: &Event) -> ListenerScope {
         | Event::DamageDealt(_)
         | Event::BlockGained(_)
         | Event::PowerApplied(_)
+        | Event::PowerAmountChanged(_)
         | Event::ResourceSpent(_)
         | Event::ResourceGained(_)
+        | Event::OrbChanneled(_)
+        | Event::OrbEvoked(_)
+        | Event::Summoned(_)
         | Event::CreatureHpChanged(_)
         | Event::DeathPrevented { .. }
         | Event::CreatureDied { .. } => ListenerScope::Combat,
@@ -628,6 +1008,20 @@ fn damage_listener_scope(calc: &DamageCalc) -> ListenerScope {
 
 fn block_listener_scope(calc: &BlockCalc) -> ListenerScope {
     ListenerScope::related([calc.target], calc.source)
+}
+
+fn hp_loss_listener_scope(calc: &HpLossCalc) -> ListenerScope {
+    ListenerScope::related(
+        related_creatures([calc.dealer, Some(calc.target)]),
+        calc.source,
+    )
+}
+
+fn unblocked_target_listener_scope(calc: &UnblockedDamageTargetCalc) -> ListenerScope {
+    ListenerScope::related(
+        related_creatures([calc.dealer, Some(calc.original_target), Some(calc.target)]),
+        calc.source,
+    )
 }
 
 fn resource_cost_listener_scope(state: &GameState, calc: &ResourceCostCalc) -> ListenerScope {
@@ -647,6 +1041,17 @@ fn card_result_pile_listener_scope(
     )
 }
 
+fn power_amount_listener_scope(calc: &PowerAmountCalc) -> ListenerScope {
+    ListenerScope::related(
+        related_creatures([calc.giver, Some(calc.target)]),
+        calc.source,
+    )
+}
+
+fn player_listener_scope(state: &GameState, player: PlayerId) -> ListenerScope {
+    ListenerScope::related(player_creature_for(state, player), None)
+}
+
 fn decision_listener_scope(state: &GameState, query: &DecisionQuery) -> ListenerScope {
     match query.kind {
         DecisionQueryKind::ShouldPlay { card, target } => {
@@ -658,7 +1063,6 @@ fn decision_listener_scope(state: &GameState, query: &DecisionQuery) -> Listener
         }
         DecisionQueryKind::ShouldDraw { player, .. }
         | DecisionQueryKind::ShouldFlush { player }
-        | DecisionQueryKind::ShouldPayExcessEnergyCostWithStars { player }
         | DecisionQueryKind::ShouldTakeExtraTurn { player } => {
             ListenerScope::related(player_creature_for(state, player), query.source)
         }

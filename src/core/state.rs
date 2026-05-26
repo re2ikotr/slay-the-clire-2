@@ -4,13 +4,15 @@ use std::fmt;
 use rust_decimal::Decimal;
 
 use crate::core::ids::{
-    CardId, CardInstanceId, CombatId, CreatureId, ModifierInstanceId, MonsterId, PlayerId,
-    PotionId, PotionInstanceId, PowerId, PowerInstanceId, RelicId, RelicInstanceId,
+    CardId, CardInstanceId, CombatId, CreatureId, ModifierInstanceId, MonsterId, OrbId,
+    OrbInstanceId, PlayerId, PotionId, PotionInstanceId, PowerId, PowerInstanceId, RelicId,
+    RelicInstanceId,
 };
 use crate::core::rng::RngSet;
 
 pub const MAX_CARDS_IN_HAND: usize = 10;
 pub const BASE_HAND_DRAW_COUNT: u8 = 5;
+pub const MAX_ORB_SLOTS: u8 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Side {
@@ -22,6 +24,11 @@ pub enum Side {
 pub enum ResourceKind {
     Energy,
     Stars,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerPetKind {
+    Osty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +198,8 @@ pub struct PotionInstance {
 pub struct Creature {
     pub id: CreatureId,
     pub model: Option<MonsterId>,
+    pub pet_owner: Option<PlayerId>,
+    pub pet_kind: Option<PlayerPetKind>,
     pub side: Side,
     pub hp: i32,
     pub max_hp: i32,
@@ -205,6 +214,8 @@ impl Creature {
         Self {
             id,
             model: None,
+            pet_owner: None,
+            pet_kind: None,
             side,
             hp: max_hp,
             max_hp,
@@ -217,6 +228,12 @@ impl Creature {
 
     pub fn with_model(mut self, model: MonsterId) -> Self {
         self.model = Some(model);
+        self
+    }
+
+    pub fn with_pet(mut self, owner: PlayerId, kind: PlayerPetKind) -> Self {
+        self.pet_owner = Some(owner);
+        self.pet_kind = Some(kind);
         self
     }
 
@@ -301,9 +318,39 @@ pub struct PlayerState {
     pub energy: i32,
     pub max_energy: i32,
     pub stars: i32,
+    pub orb_queue: OrbQueue,
     pub relics: Vec<RelicInstanceId>,
     pub potions: Vec<PotionInstanceId>,
     pub piles: CardPiles,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OrbQueue {
+    pub base_slots: u8,
+    pub slots: u8,
+    pub orbs: Vec<OrbInstanceId>,
+}
+
+impl OrbQueue {
+    pub fn with_base_slots(base_slots: u8) -> Self {
+        let slots = base_slots.min(MAX_ORB_SLOTS);
+        Self {
+            base_slots: slots,
+            slots,
+            orbs: Vec::new(),
+        }
+    }
+
+    pub fn has_room(&self) -> bool {
+        self.orbs.len() < usize::from(self.slots)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrbInstance {
+    pub id: OrbInstanceId,
+    pub def: OrbId,
+    pub owner: PlayerId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,6 +361,7 @@ pub struct CombatState {
     pub creatures: Vec<Creature>,
     pub cards: BTreeMap<CardInstanceId, CardInstance>,
     pub powers: BTreeMap<PowerInstanceId, PowerInstance>,
+    pub orbs: BTreeMap<OrbInstanceId, OrbInstance>,
     pub relics: BTreeMap<RelicInstanceId, RelicInstance>,
     pub potions: BTreeMap<PotionInstanceId, PotionInstance>,
     pub modifiers: Vec<ModifierInstanceId>,
@@ -321,6 +369,7 @@ pub struct CombatState {
     pub combat_stats: CombatStats,
     pub(crate) next_card_instance: u32,
     pub(crate) next_power_instance: u32,
+    pub(crate) next_orb_instance: u32,
 }
 
 impl CombatState {
@@ -335,6 +384,12 @@ impl CombatState {
     pub(crate) fn alloc_power_instance_id(&mut self) -> PowerInstanceId {
         let id = PowerInstanceId::new(self.next_power_instance);
         self.next_power_instance += 1;
+        id
+    }
+
+    pub(crate) fn alloc_orb_instance_id(&mut self) -> OrbInstanceId {
+        let id = OrbInstanceId::new(self.next_orb_instance);
+        self.next_orb_instance += 1;
         id
     }
 
@@ -417,6 +472,8 @@ pub enum StateError {
     UnknownPlayer(PlayerId),
     UnknownCreature(CreatureId),
     UnknownCard(CardInstanceId),
+    UnknownPower(PowerInstanceId),
+    UnknownOrb(OrbInstanceId),
     CardMissingFromPile {
         card: CardInstanceId,
         pile: PileId,
@@ -425,6 +482,7 @@ pub enum StateError {
         resource: ResourceKind,
         amount: i32,
     },
+    NoOrbSlot(PlayerId),
     NotEnoughResource {
         player: PlayerId,
         resource: ResourceKind,
@@ -440,12 +498,15 @@ impl fmt::Display for StateError {
             Self::UnknownPlayer(player) => write!(f, "unknown player: {:?}", player),
             Self::UnknownCreature(creature) => write!(f, "unknown creature: {:?}", creature),
             Self::UnknownCard(card) => write!(f, "unknown card: {:?}", card),
+            Self::UnknownPower(power) => write!(f, "unknown power: {:?}", power),
+            Self::UnknownOrb(orb) => write!(f, "unknown orb: {:?}", orb),
             Self::CardMissingFromPile { card, pile } => {
                 write!(f, "card {:?} is missing from pile {:?}", card, pile)
             }
             Self::InvalidResourceAmount { resource, amount } => {
                 write!(f, "invalid {:?} amount: {amount}", resource)
             }
+            Self::NoOrbSlot(player) => write!(f, "player {:?} has no available orb slot", player),
             Self::NotEnoughResource {
                 player,
                 resource,

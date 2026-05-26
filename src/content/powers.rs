@@ -1,12 +1,13 @@
 use rust_decimal::Decimal;
 
 use crate::content::cards::{CardTag, CardType};
-use crate::core::effect::{DamageKind, Effect, Source};
+use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
 use crate::core::query::{
     BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind,
-    PreventReason, ResourceCostCalc,
+    HpLossCalc, OrbPassiveTriggerCountCalc, OrbValueCalc, PowerAmountCalc, PreventReason,
+    ResourceCostCalc, SummonAmountCalc, UnblockedDamageTargetCalc,
 };
 use crate::core::rules::{prevent_by_current_listener, RuleCtx};
 use crate::core::state::{PileId, PileKind, ResourceKind, Side};
@@ -15,11 +16,28 @@ use crate::registry::DefRegistry;
 pub type PowerEventFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, &Event) -> Vec<Effect>;
 pub type PowerModifyDamageFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, DamageCalc) -> DamageCalc;
 pub type PowerModifyBlockFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, BlockCalc) -> BlockCalc;
+pub type PowerModifyHpLossFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, HpLossCalc) -> HpLossCalc;
+pub type PowerModifyUnblockedDamageTargetFn = for<'a> fn(
+    &RuleCtx<'a>,
+    PowerInstanceId,
+    UnblockedDamageTargetCalc,
+) -> UnblockedDamageTargetCalc;
 pub type PowerModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, PowerInstanceId, ResourceCostCalc) -> ResourceCostCalc;
 pub type PowerModifyResultPileFn =
     for<'a> fn(&RuleCtx<'a>, PowerInstanceId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type PowerDecisionFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, &DecisionQuery) -> Decision;
+pub type PowerModifyPowerAmountFn =
+    for<'a> fn(&RuleCtx<'a>, PowerInstanceId, PowerAmountCalc) -> PowerAmountCalc;
+pub type PowerModifyOrbPassiveCountFn = for<'a> fn(
+    &RuleCtx<'a>,
+    PowerInstanceId,
+    OrbPassiveTriggerCountCalc,
+) -> OrbPassiveTriggerCountCalc;
+pub type PowerModifyOrbValueFn =
+    for<'a> fn(&RuleCtx<'a>, PowerInstanceId, OrbValueCalc) -> OrbValueCalc;
+pub type PowerModifySummonAmountFn =
+    for<'a> fn(&RuleCtx<'a>, PowerInstanceId, SummonAmountCalc) -> SummonAmountCalc;
 
 #[derive(Clone)]
 pub struct PowerDef {
@@ -36,8 +54,14 @@ pub struct PowerRules {
     pub modify_damage_cap: Option<PowerModifyDamageFn>,
     pub modify_block_additive: Option<PowerModifyBlockFn>,
     pub modify_block_multiplicative: Option<PowerModifyBlockFn>,
+    pub modify_hp_loss: Option<PowerModifyHpLossFn>,
+    pub modify_unblocked_damage_target: Option<PowerModifyUnblockedDamageTargetFn>,
     pub modify_resource_cost: Option<PowerModifyResourceCostFn>,
     pub modify_card_play_result_pile: Option<PowerModifyResultPileFn>,
+    pub modify_power_amount: Option<PowerModifyPowerAmountFn>,
+    pub modify_orb_passive_trigger_count: Option<PowerModifyOrbPassiveCountFn>,
+    pub modify_orb_value: Option<PowerModifyOrbValueFn>,
+    pub modify_summon_amount: Option<PowerModifySummonAmountFn>,
     pub decide: Option<PowerDecisionFn>,
 }
 
@@ -80,6 +104,9 @@ power_ids! {
     TANK_POWER => "TANK_POWER",
     UNMOVABLE_POWER => "UNMOVABLE_POWER",
     VICIOUS_POWER => "VICIOUS_POWER",
+    POISON_POWER => "POISON_POWER",
+    DOOM_POWER => "DOOM_POWER",
+    CALAMITY_POWER => "CALAMITY_POWER",
 }
 
 pub fn register_core_powers(registry: &mut DefRegistry<PowerId, PowerDef>) {
@@ -116,6 +143,9 @@ pub fn register_core_powers(registry: &mut DefRegistry<PowerId, PowerDef>) {
         tank(),
         unmovable(),
         simple_event_power(VICIOUS_POWER, vicious_on_event),
+        simple_event_power(POISON_POWER, poison_on_event),
+        simple_event_power(DOOM_POWER, doom_on_event),
+        simple_event_power(CALAMITY_POWER, calamity_on_event),
     ] {
         registry.register(def);
     }
@@ -477,6 +507,87 @@ fn no_draw_decide(ctx: &RuleCtx<'_>, _power: PowerInstanceId, query: &DecisionQu
     } else {
         Decision::Allow
     }
+}
+
+fn poison_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Some(owner) = ctx.state.creature(instance.owner) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnStarted { side } if *side == owner.side) {
+        return Vec::new();
+    }
+    let mut effects = vec![Effect::DealDamage(DamageOp {
+        source: Some(Source::Power(power)),
+        dealer: None,
+        target: instance.owner,
+        base_amount: Decimal::from(instance.amount),
+        kind: DamageKind::LifeLoss,
+        flags: DamageFlags {
+            ignores_block: true,
+        },
+    })];
+    if instance.amount <= 1 {
+        effects.push(Effect::RemovePower { power });
+    } else {
+        effects.push(Effect::AddPowerAmount {
+            power,
+            amount: Decimal::from(-1),
+            source: Some(Source::Power(power)),
+        });
+    }
+    effects
+}
+
+fn doom_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Some(owner) = ctx.state.creature(instance.owner) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnEnded { side } if *side == owner.side) {
+        return Vec::new();
+    }
+    if owner.alive && owner.hp <= instance.amount {
+        vec![Effect::KillCreature {
+            creature: instance.owner,
+            source: Some(Source::Power(power)),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+fn calamity_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Event::CardPlayed(event) = event else {
+        return Vec::new();
+    };
+    if ctx.state.player_creature_id() != Some(instance.owner) {
+        return Vec::new();
+    }
+    let is_attack = ctx
+        .state
+        .card(event.card)
+        .and_then(|card| ctx.registry.cards.get(card.def))
+        .map(|def| def.card_type == CardType::Attack)
+        .unwrap_or(false);
+    if !is_attack {
+        return Vec::new();
+    }
+    (0..instance.amount.max(0))
+        .map(|_| Effect::GenerateRandomCardToHand {
+            player: event.player,
+            card_type: Some(CardType::Attack),
+            target: None,
+            zero_cost_this_turn: false,
+        })
+        .collect()
 }
 
 fn aggression_on_event(ctx: &RuleCtx<'_>, _power: PowerInstanceId, event: &Event) -> Vec<Effect> {

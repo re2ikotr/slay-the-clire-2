@@ -6,24 +6,27 @@ use crate::content::cards::{CardKeyword, CardPlayCtx, CardType, TargetType};
 use crate::core::command::CommandError;
 use crate::core::effect::{
     CardFilter, ChoiceAction, ChoiceKind, ChoiceOption, ChoiceResolution, ChoiceResponse,
-    ChoiceValue, DamageOp, DamageResult, Effect, MoveReason, Source, UpgradeMode,
+    ChoiceValue, DamageOp, DamageResult, DiscardKind, Effect, MoveReason, OrbSelection, OrbTrigger,
+    Source, UpgradeMode,
 };
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
-    BlockGained, CardDrawn, CardExhausted, CardPlayed, CardUpgraded, CardsShuffled,
-    CreatureHpChanged, Event, PowerApplied, ResourceChanged,
+    BlockGained, CardDiscarded, CardDrawn, CardExhausted, CardPlayed, CardUpgraded, CardsShuffled,
+    CreatureHpChanged, Event, OrbChanneled, OrbEvoked, PowerAmountChanged, PowerApplied,
+    ResourceChanged, Summoned,
 };
-use crate::core::ids::{CardInstanceId, ChoiceId, CreatureId, LocKey, PlayerId};
+use crate::core::ids::{CardInstanceId, ChoiceId, CreatureId, LocKey, OrbInstanceId, PlayerId};
 use crate::core::listener::ListenerRef;
 use crate::core::log::{LogEntry, StateChange};
 use crate::core::query::{
     BlockCalc, CardPlayResultPileCalc, CardPlayResultPileModifierLog, DamageCalc, Decision,
-    PilePosition, PreventReason, ResourceCostCalc,
+    HpLossCalc, HpLossPhase, OrbPassiveTriggerCountCalc, PilePosition, PowerAmountCalc,
+    PowerAmountPhase, PreventReason, ResourceCostCalc, SummonAmountCalc, UnblockedDamageTargetCalc,
 };
 use crate::core::rules::{RuleCtx, RulePipeline};
 use crate::core::state::{
-    decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileId, PileKind, ResourceKind, Side,
-    StateError, BASE_HAND_DRAW_COUNT,
+    decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileId, PileKind, PlayerPetKind,
+    ResourceKind, Side, StateError, BASE_HAND_DRAW_COUNT,
 };
 use crate::registry::StaticRegistry;
 
@@ -446,22 +449,90 @@ impl EffectResolver {
                 power,
                 amount,
                 source,
-            } => match state.apply_power(target, power, amount) {
-                Ok((instance, actual)) => {
+            } => {
+                let giver = source_creature(state, source);
+                let calc = PowerAmountCalc {
+                    source,
+                    giver,
+                    target,
+                    power,
+                    base_amount: amount,
+                    amount,
+                    phase: PowerAmountPhase::Given,
+                };
+                let (calc, given_modifiers) =
+                    RulePipeline::modify_power_amount(registry, state, calc);
+                self.log
+                    .extend(given_modifiers.into_iter().map(LogEntry::ModifierApplied));
+                let calc = PowerAmountCalc {
+                    phase: PowerAmountPhase::Received,
+                    base_amount: calc.amount,
+                    ..calc
+                };
+                let (calc, received_modifiers) =
+                    RulePipeline::modify_power_amount(registry, state, calc);
+                self.log.extend(
+                    received_modifiers
+                        .into_iter()
+                        .map(LogEntry::ModifierApplied),
+                );
+                if calc.amount == Decimal::from(0) {
+                    return ApplyResult::Continue(Vec::new());
+                }
+                match state.apply_power(target, power, calc.amount) {
+                    Ok((instance, actual)) => {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::PowerApplied {
+                                target,
+                                power: instance,
+                            }));
+                        ApplyResult::Continue(vec![
+                            Effect::Trigger(Event::PowerApplied(PowerApplied {
+                                target,
+                                power,
+                                instance,
+                                amount: actual,
+                                source,
+                            })),
+                            Effect::Trigger(Event::PowerAmountChanged(PowerAmountChanged {
+                                target,
+                                power,
+                                instance,
+                                delta: actual,
+                                source,
+                            })),
+                        ])
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
+            }
+            Effect::AddPowerAmount {
+                power,
+                amount,
+                source,
+            } => match state.add_power_amount(power, amount) {
+                Ok((target, power_def, actual)) => {
                     self.log
                         .push(LogEntry::StateChanged(StateChange::PowerApplied {
                             target,
-                            power: instance,
-                        }));
-                    ApplyResult::Continue(vec![Effect::Trigger(Event::PowerApplied(
-                        PowerApplied {
-                            target,
                             power,
-                            instance,
+                        }));
+                    ApplyResult::Continue(vec![
+                        Effect::Trigger(Event::PowerApplied(PowerApplied {
+                            target,
+                            power: power_def,
+                            instance: power,
                             amount: actual,
                             source,
-                        },
-                    ))])
+                        })),
+                        Effect::Trigger(Event::PowerAmountChanged(PowerAmountChanged {
+                            target,
+                            power: power_def,
+                            instance: power,
+                            delta: actual,
+                            source,
+                        })),
+                    ])
                 }
                 Err(error) => ApplyResult::StateError(error),
             },
@@ -482,27 +553,20 @@ impl EffectResolver {
             Effect::DrawUntilNonAttack { player } => {
                 self.apply_draw_until_non_attack(state, registry, player)
             }
-            Effect::DiscardHand { player } => match state.discard_hand(player) {
-                Ok(cards) => {
-                    for card in cards {
-                        self.log
-                            .push(LogEntry::StateChanged(StateChange::CardMoved {
-                                card,
-                                from: Some(crate::core::state::PileId {
-                                    owner: player,
-                                    kind: PileKind::Hand,
-                                }),
-                                to: crate::core::state::PileId {
-                                    owner: player,
-                                    kind: PileKind::Discard,
-                                },
-                                reason: crate::core::effect::MoveReason::Discard,
-                            }));
-                    }
-                    ApplyResult::Continue(Vec::new())
-                }
-                Err(error) => ApplyResult::StateError(error),
-            },
+            Effect::DiscardHand { player, kind } => {
+                let cards = state
+                    .combat()
+                    .filter(|combat| combat.player.id == player)
+                    .map(|combat| combat.player.piles.hand.clone())
+                    .unwrap_or_default();
+                self.discard_cards(state, registry, player, cards, kind, 0)
+            }
+            Effect::DiscardCards {
+                player,
+                cards,
+                kind,
+                then_draw,
+            } => self.discard_cards(state, registry, player, cards, kind, then_draw),
             Effect::ExhaustCard { card } => self.apply_exhaust_card(state, registry, card),
             Effect::ExhaustTopDraw { player, count } => {
                 let cards = state
@@ -692,6 +756,74 @@ impl EffectResolver {
                 count,
                 exhaust_after_play,
             } => self.apply_play_top_draw_cards(state, registry, player, count, exhaust_after_play),
+            Effect::AddOrbSlots { player, amount } => {
+                match state.add_orb_slots(player, amount) {
+                    Ok(actual) => {
+                        if actual > 0 {
+                            let slots = state
+                                .combat()
+                                .map(|combat| combat.player.orb_queue.slots)
+                                .unwrap_or_default();
+                            self.log.push(LogEntry::StateChanged(
+                                StateChange::OrbSlotCountChanged { player, slots },
+                            ));
+                        }
+                        ApplyResult::Continue(Vec::new())
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
+            }
+            Effect::RemoveOrbSlots { player, amount } => {
+                match state.remove_orb_slots(player, amount) {
+                    Ok(actual) => {
+                        if actual > 0 {
+                            let slots = state
+                                .combat()
+                                .map(|combat| combat.player.orb_queue.slots)
+                                .unwrap_or_default();
+                            self.log.push(LogEntry::StateChanged(
+                                StateChange::OrbSlotCountChanged { player, slots },
+                            ));
+                        }
+                        ApplyResult::Continue(Vec::new())
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
+            }
+            Effect::ChannelOrb {
+                player,
+                orb,
+                source,
+            } => self.channel_orb(state, player, orb, source),
+            Effect::EvokeOrb {
+                player,
+                target,
+                remove,
+                source,
+            } => self.evoke_orb(state, registry, player, target, remove, source),
+            Effect::TriggerOrbPassive {
+                orb,
+                trigger,
+                target,
+            } => self.trigger_orb_passive(state, registry, orb, trigger, target),
+            Effect::SummonOsty {
+                player,
+                amount,
+                source,
+            } => self.summon_osty(state, registry, player, amount, source),
+            Effect::KillCreature {
+                creature,
+                source: _,
+            } => match state.lose_hp(
+                creature,
+                state
+                    .creature(creature)
+                    .map(|creature| Decimal::from(creature.hp))
+                    .unwrap_or_default(),
+            ) {
+                Ok(_) => ApplyResult::Continue(vec![Effect::CheckDeaths]),
+                Err(error) => ApplyResult::StateError(error),
+            },
             Effect::ClearSideBlock(side) => {
                 let targets = state
                     .combat()
@@ -850,6 +982,272 @@ impl EffectResolver {
         self.apply_immediate_effects(state, registry, effects)
     }
 
+    fn discard_cards(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        cards: Vec<CardInstanceId>,
+        kind: DiscardKind,
+        then_draw: u8,
+    ) -> ApplyResult {
+        let mut effects = Vec::new();
+        for card in cards {
+            if !state.card_is_in_pile(card, PileKind::Hand) {
+                continue;
+            }
+            match state.move_card(card, PileId::player(player, PileKind::Discard)) {
+                Ok(from_kind) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::CardMoved {
+                            card,
+                            from: from_kind.map(|kind| PileId {
+                                owner: player,
+                                kind,
+                            }),
+                            to: PileId::player(player, PileKind::Discard),
+                            reason: MoveReason::Discard,
+                        }));
+                    effects.push(Effect::Trigger(Event::CardDiscarded(CardDiscarded {
+                        player,
+                        card,
+                        kind,
+                    })));
+                }
+                Err(error) => return ApplyResult::StateError(error),
+            }
+        }
+        if then_draw > 0 {
+            effects.push(Effect::DrawCards {
+                player,
+                count: then_draw,
+            });
+        }
+        self.apply_immediate_effects(state, registry, effects)
+    }
+
+    fn channel_orb(
+        &mut self,
+        state: &mut GameState,
+        player: PlayerId,
+        orb: crate::core::ids::OrbId,
+        source: Option<Source>,
+    ) -> ApplyResult {
+        let Some(queue) = state
+            .combat()
+            .filter(|combat| combat.player.id == player)
+            .map(|combat| combat.player.orb_queue.clone())
+        else {
+            return ApplyResult::StateError(StateError::UnknownPlayer(player));
+        };
+
+        if queue.base_slots == 0 && queue.slots == 0 {
+            return ApplyResult::Continue(vec![
+                Effect::AddOrbSlots { player, amount: 1 },
+                Effect::ChannelOrb {
+                    player,
+                    orb,
+                    source,
+                },
+            ]);
+        }
+
+        if !queue.has_room() {
+            return ApplyResult::Continue(vec![
+                Effect::EvokeOrb {
+                    player,
+                    target: OrbSelection::First,
+                    remove: true,
+                    source,
+                },
+                Effect::ChannelOrb {
+                    player,
+                    orb,
+                    source,
+                },
+            ]);
+        }
+
+        match state.channel_orb(player, orb) {
+            Ok(instance) => {
+                self.log
+                    .push(LogEntry::StateChanged(StateChange::OrbChanneled {
+                        orb: instance,
+                    }));
+                ApplyResult::Continue(vec![Effect::Trigger(Event::OrbChanneled(OrbChanneled {
+                    player,
+                    orb: instance,
+                    orb_def: orb,
+                    source,
+                }))])
+            }
+            Err(error) => ApplyResult::StateError(error),
+        }
+    }
+
+    fn evoke_orb(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        target: OrbSelection,
+        remove: bool,
+        source: Option<Source>,
+    ) -> ApplyResult {
+        let Some(orb) = select_orb(state, player, target) else {
+            return ApplyResult::Continue(Vec::new());
+        };
+        let Some(instance) = state.orb(orb).cloned() else {
+            return ApplyResult::StateError(StateError::UnknownOrb(orb));
+        };
+        let ctx = RuleCtx {
+            state,
+            registry,
+            listener: Some(ListenerRef::Orb(orb)),
+        };
+        let effects = registry
+            .orbs
+            .get(instance.def)
+            .map(|def| (def.evoke)(&ctx, orb, None))
+            .unwrap_or_default();
+        match self.apply_immediate_effects(state, registry, effects) {
+            ApplyResult::Continue(_) => {}
+            other => return other,
+        }
+
+        if remove {
+            match state.remove_orb(orb) {
+                Ok(_) => {}
+                Err(error) => return ApplyResult::StateError(error),
+            }
+        }
+        self.log
+            .push(LogEntry::StateChanged(StateChange::OrbEvoked {
+                orb,
+                removed: remove,
+            }));
+        ApplyResult::Continue(vec![Effect::Trigger(Event::OrbEvoked(OrbEvoked {
+            player,
+            orb,
+            orb_def: instance.def,
+            removed: remove,
+            source,
+            targets: Vec::new(),
+        }))])
+    }
+
+    fn trigger_orb_passive(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        orb: OrbInstanceId,
+        trigger: OrbTrigger,
+        target: Option<CreatureId>,
+    ) -> ApplyResult {
+        let Some(instance) = state.orb(orb).cloned() else {
+            return ApplyResult::Continue(Vec::new());
+        };
+        let calc = OrbPassiveTriggerCountCalc {
+            player: instance.owner,
+            orb,
+            trigger,
+            base_count: 1,
+            count: 1,
+        };
+        let (calc, modifiers) =
+            RulePipeline::modify_orb_passive_trigger_count(registry, state, calc);
+        self.log
+            .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
+        if calc.count <= 0 {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        for _ in 0..calc.count {
+            let ctx = RuleCtx {
+                state,
+                registry,
+                listener: Some(ListenerRef::Orb(orb)),
+            };
+            let effects = registry
+                .orbs
+                .get(instance.def)
+                .map(|def| (def.passive)(&ctx, orb, target))
+                .unwrap_or_default();
+            match self.apply_immediate_effects(state, registry, effects) {
+                ApplyResult::Continue(_) => {}
+                other => return other,
+            }
+        }
+        ApplyResult::Continue(Vec::new())
+    }
+
+    fn summon_osty(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        amount: Decimal,
+        source: Option<Source>,
+    ) -> ApplyResult {
+        let calc = SummonAmountCalc {
+            player,
+            source,
+            base_amount: amount,
+            amount,
+        };
+        let (calc, modifiers) = RulePipeline::modify_summon_amount(registry, state, calc);
+        self.log
+            .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
+        let amount = decimal_to_i32_trunc(calc.amount).max(0);
+        if amount == 0 {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let Some(combat) = state.combat_mut() else {
+            return ApplyResult::StateError(StateError::CombatNotActive);
+        };
+        if combat.player.id != player {
+            return ApplyResult::StateError(StateError::UnknownPlayer(player));
+        }
+
+        let existing = combat.creatures.iter().position(|creature| {
+            creature.pet_owner == Some(player) && creature.pet_kind == Some(PlayerPetKind::Osty)
+        });
+        let creature_id = if let Some(index) = existing {
+            let creature = &mut combat.creatures[index];
+            if creature.alive {
+                creature.max_hp = creature.max_hp.saturating_add(amount);
+                creature.hp = creature.hp.saturating_add(amount).min(creature.max_hp);
+            } else {
+                creature.alive = true;
+                creature.max_hp = amount;
+                creature.hp = amount;
+            }
+            creature.id
+        } else {
+            let next = combat
+                .creatures
+                .iter()
+                .map(|creature| creature.id.get())
+                .max()
+                .unwrap_or(1)
+                + 1;
+            let id = CreatureId::new(next);
+            combat.creatures.push(
+                crate::core::state::Creature::new(id, Side::Player, amount)
+                    .with_pet(player, PlayerPetKind::Osty),
+            );
+            id
+        };
+
+        ApplyResult::Continue(vec![Effect::Trigger(Event::Summoned(Summoned {
+            player,
+            creature: creature_id,
+            amount,
+            source,
+        }))])
+    }
+
     fn apply_damage(
         &mut self,
         state: &mut GameState,
@@ -882,7 +1280,7 @@ impl EffectResolver {
             calc.amount
         };
 
-        let hp_before = creature.hp;
+        let original_target = target;
         let block_before = creature.block;
         let mut blocked = 0;
         let mut hp_loss = requested;
@@ -901,7 +1299,54 @@ impl EffectResolver {
             hp_loss = requested - blocked_decimal;
         }
 
-        let actual_hp_loss = match state.lose_hp(target, hp_loss) {
+        let before_redirect = HpLossCalc {
+            source: op.source,
+            dealer: op.dealer,
+            target: original_target,
+            kind: op.kind,
+            base_amount: hp_loss,
+            amount: hp_loss,
+            phase: HpLossPhase::BeforeRedirect,
+        };
+        let (before_redirect, modifiers) =
+            RulePipeline::modify_hp_loss(registry, state, before_redirect);
+        self.log
+            .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
+        hp_loss = before_redirect.amount.max(Decimal::from(0));
+
+        let redirect = UnblockedDamageTargetCalc {
+            source: op.source,
+            dealer: op.dealer,
+            original_target,
+            target: original_target,
+            amount: hp_loss,
+        };
+        let (redirect, modifiers) =
+            RulePipeline::modify_unblocked_damage_target(registry, state, redirect);
+        self.log
+            .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
+        let damage_target = redirect.target;
+
+        let after_redirect = HpLossCalc {
+            source: op.source,
+            dealer: op.dealer,
+            target: damage_target,
+            kind: op.kind,
+            base_amount: hp_loss,
+            amount: hp_loss,
+            phase: HpLossPhase::AfterRedirect,
+        };
+        let (after_redirect, modifiers) =
+            RulePipeline::modify_hp_loss(registry, state, after_redirect);
+        self.log
+            .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
+        hp_loss = after_redirect.amount.max(Decimal::from(0));
+
+        let hp_before = state
+            .creature(damage_target)
+            .map(|creature| creature.hp)
+            .unwrap_or(0);
+        let actual_hp_loss = match state.lose_hp(damage_target, hp_loss) {
             Ok(actual) => actual,
             Err(error) => return ApplyResult::StateError(error),
         };
@@ -910,7 +1355,7 @@ impl EffectResolver {
         let result = DamageResult {
             source: op.source,
             dealer: op.dealer,
-            target,
+            target: damage_target,
             kind: op.kind,
             requested,
             blocked,
@@ -924,7 +1369,7 @@ impl EffectResolver {
 
         ApplyResult::Continue(vec![
             Effect::Trigger(Event::CreatureHpChanged(CreatureHpChanged {
-                creature: target,
+                creature: damage_target,
                 before: hp_before,
                 after: hp_after,
                 source: op.source,
@@ -1495,6 +1940,39 @@ fn matching_hand_cards(
         .collect()
 }
 
+fn source_creature(state: &GameState, source: Option<Source>) -> Option<CreatureId> {
+    match source {
+        Some(Source::Creature(creature)) => Some(creature),
+        Some(Source::Card(card)) => state
+            .card(card)
+            .and_then(|card| state.combat().map(|combat| (card.owner, combat)))
+            .and_then(|(owner, combat)| {
+                (combat.player.id == owner).then_some(combat.player.creature)
+            }),
+        Some(Source::Power(power)) => state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+            .map(|power| power.owner),
+        Some(Source::Relic(_)) | Some(Source::Potion(_)) | Some(Source::System) | None => None,
+    }
+}
+
+fn select_orb(
+    state: &GameState,
+    player: PlayerId,
+    selection: OrbSelection,
+) -> Option<OrbInstanceId> {
+    let queue = state
+        .combat()
+        .filter(|combat| combat.player.id == player)
+        .map(|combat| &combat.player.orb_queue)?;
+    match selection {
+        OrbSelection::First => queue.orbs.first().copied(),
+        OrbSelection::Last => queue.orbs.last().copied(),
+        OrbSelection::Exact(orb) => queue.orbs.contains(&orb).then_some(orb),
+    }
+}
+
 fn card_loc_key(
     state: &GameState,
     registry: &StaticRegistry,
@@ -1653,6 +2131,13 @@ fn start_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
         Side::Player => {
             if let Some(combat) = state.combat() {
                 let player = combat.player.id;
+                for orb in combat.player.orb_queue.orbs.iter().copied() {
+                    effects.push(Effect::TriggerOrbPassive {
+                        orb,
+                        trigger: OrbTrigger::AfterTurnStart,
+                        target: None,
+                    });
+                }
                 let diff = combat.player.max_energy - combat.player.energy;
                 if diff > 0 {
                     effects.push(Effect::GainResource {
@@ -1685,11 +2170,25 @@ fn end_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
         Side::Player => state
             .player_id()
             .map(|player| {
-                vec![
-                    Effect::DiscardHand { player },
+                let mut effects = Vec::new();
+                if let Some(combat) = state.combat() {
+                    for orb in combat.player.orb_queue.orbs.iter().copied() {
+                        effects.push(Effect::TriggerOrbPassive {
+                            orb,
+                            trigger: OrbTrigger::BeforeTurnEnd,
+                            target: None,
+                        });
+                    }
+                }
+                effects.extend([
+                    Effect::DiscardHand {
+                        player,
+                        kind: DiscardKind::EndOfTurn,
+                    },
                     Effect::CheckCombatEnd,
                     Effect::StartTurn(Side::Monsters),
-                ]
+                ]);
+                effects
             })
             .unwrap_or_default(),
         Side::Monsters => vec![
@@ -1736,20 +2235,29 @@ mod tests {
     use crate::content::cards::{
         CardDef, CardPlayCtx, CardPoolId, CardRarity, CardRules, CardType, TargetType,
     };
-    use crate::content::powers::{PowerDef, PowerRules};
+    use crate::content::orbs::{OrbDef, OrbRules};
+    use crate::content::powers::{PowerDef, PowerRules, CALAMITY_POWER, DOOM_POWER, POISON_POWER};
+    use crate::content::relics::{RelicDef, RelicRules};
     use crate::core::effect::{
         CardFilter, ChoiceAction, ChoiceResponse, ChoiceValue, DamageAllEnemiesOp, DamageFlags,
-        DamageKind, DamageOp, Effect, Source,
+        DamageKind, DamageOp, DiscardKind, Effect, MoveReason, OrbTrigger, Source,
     };
     use crate::core::engine::{CombatOutcome, Engine, StepResult};
-    use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey, PowerId, PowerInstanceId};
+    use crate::core::event::Event;
+    use crate::core::ids::{
+        CardId, CardInstanceId, CreatureId, LocKey, OrbId, OrbInstanceId, PowerId, PowerInstanceId,
+        RelicId, RelicInstanceId,
+    };
     use crate::core::log::{LogEntry, StateChange};
     use crate::core::query::{
-        DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
+        DamageCalc, Decision, DecisionQuery, DecisionQueryKind, OrbPassiveTriggerCountCalc,
+        PowerAmountCalc, PowerAmountPhase, PreventReason, SummonAmountCalc,
+        UnblockedDamageTargetCalc,
     };
     use crate::core::rules::{prevent_by_current_listener, RuleCtx};
     use crate::core::state::{
         CardCost, CardCosts, CombatSetupCard, CombatSetupMonster, GameState, PileKind,
+        PlayerPetKind, RelicInstance, ResourceKind,
     };
     use crate::core::Command;
     use crate::registry::StaticRegistry;
@@ -1759,6 +2267,9 @@ mod tests {
     const STARTER_STRIKE: CardId = CardId::new("starter_strike");
     const TEST_STRENGTH: PowerId = PowerId::new("test_strength");
     const TEST_CANNOT_DIE: PowerId = PowerId::new("test_cannot_die");
+    const TEST_OSTY_REDIRECT: PowerId = PowerId::new("test_osty_redirect");
+    const TEST_RELIC: RelicId = RelicId::new("test_relic");
+    const TEST_ORB: OrbId = OrbId::new("test_orb");
 
     fn test_strike_body(
         ctx: &CardPlayCtx<'_>,
@@ -1854,6 +2365,126 @@ mod tests {
             loc_key: LocKey::new("power.test_cannot_die"),
             rules: PowerRules {
                 decide: Some(prevent_owner_death),
+                ..PowerRules::default()
+            },
+        }
+    }
+
+    fn poison_amount_relic(
+        _ctx: &RuleCtx<'_>,
+        _relic: RelicInstanceId,
+        mut calc: PowerAmountCalc,
+    ) -> PowerAmountCalc {
+        if calc.power == POISON_POWER && calc.phase == PowerAmountPhase::Given {
+            calc.amount += Decimal::from(1);
+        }
+        calc
+    }
+
+    fn orb_trigger_relic(
+        _ctx: &RuleCtx<'_>,
+        _relic: RelicInstanceId,
+        mut calc: OrbPassiveTriggerCountCalc,
+    ) -> OrbPassiveTriggerCountCalc {
+        calc.count += 1;
+        calc
+    }
+
+    fn summon_amount_relic(
+        _ctx: &RuleCtx<'_>,
+        _relic: RelicInstanceId,
+        mut calc: SummonAmountCalc,
+    ) -> SummonAmountCalc {
+        calc.amount += Decimal::from(2);
+        calc
+    }
+
+    fn test_relic() -> RelicDef {
+        RelicDef {
+            id: TEST_RELIC,
+            loc_key: LocKey::new("relic.test"),
+            rules: RelicRules {
+                modify_power_amount: Some(poison_amount_relic),
+                modify_orb_passive_trigger_count: Some(orb_trigger_relic),
+                modify_summon_amount: Some(summon_amount_relic),
+                ..RelicRules::default()
+            },
+        }
+    }
+
+    fn add_test_relic(state: &mut GameState) -> RelicInstanceId {
+        let id = RelicInstanceId::new(777);
+        let combat = state.combat_mut().unwrap();
+        combat.relics.insert(
+            id,
+            RelicInstance {
+                id,
+                def: TEST_RELIC,
+            },
+        );
+        combat.player.relics.push(id);
+        id
+    }
+
+    fn test_orb_passive(
+        ctx: &RuleCtx<'_>,
+        orb: OrbInstanceId,
+        _: Option<CreatureId>,
+    ) -> Vec<Effect> {
+        let Some(player) = ctx.state.orb(orb).map(|orb| orb.owner) else {
+            return Vec::new();
+        };
+        vec![Effect::GainResource {
+            player,
+            resource: ResourceKind::Energy,
+            amount: 1,
+        }]
+    }
+
+    fn test_orb_def() -> OrbDef {
+        OrbDef {
+            id: TEST_ORB,
+            loc_key: LocKey::new("orb.test"),
+            passive: test_orb_passive,
+            evoke: test_orb_passive,
+            rules: OrbRules::default(),
+        }
+    }
+
+    fn osty_redirect(
+        ctx: &RuleCtx<'_>,
+        power: PowerInstanceId,
+        mut calc: UnblockedDamageTargetCalc,
+    ) -> UnblockedDamageTargetCalc {
+        let Some(instance) = ctx
+            .state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+        else {
+            return calc;
+        };
+        if calc.target != instance.owner || calc.amount <= Decimal::from(0) {
+            return calc;
+        }
+        let Some(combat) = ctx.state.combat() else {
+            return calc;
+        };
+        if let Some(osty) = combat.creatures.iter().find(|creature| {
+            creature.alive
+                && creature.pet_owner == Some(combat.player.id)
+                && creature.pet_kind == Some(PlayerPetKind::Osty)
+        }) {
+            calc.target = osty.id;
+        }
+        calc
+    }
+
+    fn osty_redirect_def() -> PowerDef {
+        PowerDef {
+            id: TEST_OSTY_REDIRECT,
+            loc_key: LocKey::new("power.osty_redirect"),
+            rules: PowerRules {
+                modify_unblocked_damage_target: Some(osty_redirect),
                 ..PowerRules::default()
             },
         }
@@ -2022,6 +2653,360 @@ mod tests {
         assert_eq!(combat.player.energy, 3);
         assert_eq!(combat.player.stars, 0);
         assert!(combat.player.piles.hand.contains(&card));
+    }
+
+    #[test]
+    fn manual_and_end_of_turn_discards_emit_distinct_events() {
+        let registry = StaticRegistry::empty();
+        let mut manual_state = GameState::demo_combat(31);
+        let player = manual_state.player_id().unwrap();
+        let card = manual_state.combat().unwrap().player.piles.hand[0];
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::DiscardCards {
+            player,
+            cards: vec![card],
+            kind: DiscardKind::Manual,
+            then_draw: 0,
+        });
+
+        let StepResult::Done(manual_log) = resolver.drain(&mut manual_state, &registry) else {
+            panic!("manual discard should finish");
+        };
+        assert!(manual_state.card_is_in_pile(card, PileKind::Discard));
+        assert!(manual_log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::EventTriggered(Event::CardDiscarded(event))
+                if event.card == card && event.kind == DiscardKind::Manual
+        )));
+
+        let mut cleanup_state = GameState::demo_combat(32);
+        let player = cleanup_state.player_id().unwrap();
+        let card = cleanup_state.combat().unwrap().player.piles.hand[0];
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::DiscardHand {
+            player,
+            kind: DiscardKind::EndOfTurn,
+        });
+
+        let StepResult::Done(cleanup_log) = resolver.drain(&mut cleanup_state, &registry) else {
+            panic!("end-of-turn discard should finish");
+        };
+        assert!(cleanup_state.card_is_in_pile(card, PileKind::Discard));
+        assert!(cleanup_log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::EventTriggered(Event::CardDiscarded(event))
+                if event.card == card && event.kind == DiscardKind::EndOfTurn
+        )));
+    }
+
+    #[test]
+    fn poison_uses_power_amount_modifiers_and_ticks_on_owner_turn_start() {
+        let mut registry = StaticRegistry::default();
+        registry.relics.register(test_relic());
+        let mut state = GameState::demo_combat(33);
+        add_test_relic(&mut state);
+        let player_creature = state.player_creature_id().unwrap();
+        let enemy = state.combat().unwrap().monster_ids()[0];
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::ApplyPower {
+            target: enemy,
+            power: POISON_POWER,
+            amount: Decimal::from(2),
+            source: Some(Source::Creature(player_creature)),
+        });
+
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        assert_eq!(state.power_amount(enemy, POISON_POWER), 3);
+
+        resolver.enqueue(Effect::Trigger(Event::TurnStarted {
+            side: crate::core::state::Side::Monsters,
+        }));
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        assert_eq!(state.creature(enemy).unwrap().hp, 27);
+        assert_eq!(state.power_amount(enemy, POISON_POWER), 2);
+    }
+
+    #[test]
+    fn orb_channeling_adds_default_slot_and_passive_count_is_modifiable() {
+        let mut registry = StaticRegistry::default();
+        registry.orbs.register(test_orb_def());
+        registry.relics.register(test_relic());
+        let mut state = GameState::demo_combat(34);
+        add_test_relic(&mut state);
+        let player = state.player_id().unwrap();
+        state.combat_mut().unwrap().player.energy = 0;
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::ChannelOrb {
+            player,
+            orb: TEST_ORB,
+            source: None,
+        });
+
+        let StepResult::Done(channel_log) = resolver.drain(&mut state, &registry) else {
+            panic!("orb channel should finish");
+        };
+        let orb = state.combat().unwrap().player.orb_queue.orbs[0];
+        assert_eq!(state.combat().unwrap().player.orb_queue.slots, 1);
+        assert!(channel_log
+            .iter()
+            .any(|entry| matches!(entry, LogEntry::EventTriggered(Event::OrbChanneled(_)))));
+
+        resolver.enqueue(Effect::TriggerOrbPassive {
+            orb,
+            trigger: OrbTrigger::AfterTurnStart,
+            target: None,
+        });
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        assert_eq!(state.combat().unwrap().player.energy, 2);
+    }
+
+    #[test]
+    fn summoning_osty_creates_grows_and_revives_the_pet() {
+        let mut registry = StaticRegistry::default();
+        registry.relics.register(test_relic());
+        let mut state = GameState::demo_combat(35);
+        add_test_relic(&mut state);
+        let player = state.player_id().unwrap();
+        let mut resolver = EffectResolver::default();
+
+        resolver.enqueue(Effect::SummonOsty {
+            player,
+            amount: Decimal::from(5),
+            source: None,
+        });
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        let osty = state
+            .combat()
+            .unwrap()
+            .creatures
+            .iter()
+            .find(|creature| creature.pet_kind == Some(PlayerPetKind::Osty))
+            .unwrap()
+            .id;
+        assert_eq!(state.creature(osty).unwrap().max_hp, 7);
+
+        resolver.enqueue(Effect::SummonOsty {
+            player,
+            amount: Decimal::from(3),
+            source: None,
+        });
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        assert_eq!(state.creature(osty).unwrap().max_hp, 12);
+
+        {
+            let osty_state = state.creature_mut(osty).unwrap();
+            osty_state.alive = false;
+            osty_state.hp = 0;
+        }
+        resolver.enqueue(Effect::SummonOsty {
+            player,
+            amount: Decimal::from(4),
+            source: None,
+        });
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        let osty_state = state.creature(osty).unwrap();
+        assert!(osty_state.alive);
+        assert_eq!(osty_state.hp, 6);
+        assert_eq!(osty_state.max_hp, 6);
+    }
+
+    #[test]
+    fn osty_redirect_interface_can_move_unblocked_attack_damage() {
+        let mut registry = StaticRegistry::default();
+        registry.powers.register(osty_redirect_def());
+        let mut state = GameState::demo_combat(36);
+        let player = state.player_id().unwrap();
+        let player_creature = state.player_creature_id().unwrap();
+        let enemy = state.combat().unwrap().monster_ids()[0];
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::SummonOsty {
+            player,
+            amount: Decimal::from(6),
+            source: None,
+        });
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        let osty = state
+            .combat()
+            .unwrap()
+            .creatures
+            .iter()
+            .find(|creature| creature.pet_kind == Some(PlayerPetKind::Osty))
+            .unwrap()
+            .id;
+        state
+            .apply_power(player_creature, TEST_OSTY_REDIRECT, Decimal::from(1))
+            .unwrap();
+
+        resolver.enqueue(Effect::DealDamage(DamageOp {
+            source: Some(Source::Creature(enemy)),
+            dealer: Some(enemy),
+            target: player_creature,
+            base_amount: Decimal::from(4),
+            kind: DamageKind::Attack,
+            flags: DamageFlags {
+                ignores_block: false,
+            },
+        }));
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+        assert_eq!(state.creature(player_creature).unwrap().hp, 50);
+        assert_eq!(state.creature(osty).unwrap().hp, 2);
+    }
+
+    #[test]
+    fn doom_kills_at_side_turn_end_when_amount_reaches_hp() {
+        let registry = StaticRegistry::default();
+        let mut state = GameState::demo_combat(37);
+        let enemy = state.combat().unwrap().monster_ids()[0];
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::ApplyPower {
+            target: enemy,
+            power: DOOM_POWER,
+            amount: Decimal::from(30),
+            source: None,
+        });
+        resolver.enqueue(Effect::Trigger(Event::TurnEnded {
+            side: crate::core::state::Side::Monsters,
+        }));
+
+        let StepResult::CombatOver(result, _) = resolver.drain(&mut state, &registry) else {
+            panic!("doom should end the one-monster combat");
+        };
+        assert_eq!(result.outcome, CombatOutcome::Victory);
+        assert!(!state.creature(enemy).unwrap().alive);
+    }
+
+    #[test]
+    fn calamity_generates_attacks_after_player_attacks() {
+        let mut registry = StaticRegistry::default();
+        registry.cards.register(test_strike_def());
+        let mut engine = Engine::with_registry(GameState::demo_combat(39), registry);
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        engine
+            .state
+            .apply_power(player_creature, CALAMITY_POWER, Decimal::from(1))
+            .unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        let target = engine.state.combat().unwrap().monster_ids()[0];
+
+        let StepResult::Done(log) = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: Some(target),
+        }) else {
+            panic!("calamity attack should resolve");
+        };
+
+        assert_eq!(engine.state.combat().unwrap().player.piles.hand.len(), 1);
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::StateChanged(StateChange::CardMoved {
+                from: None,
+                reason: MoveReason::Generated,
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn discard_orb_and_poison_mechanics_compose_in_one_resolution_flow() {
+        let setup = CombatSetupCard {
+            def: STARTER_STRIKE,
+            upgraded: false,
+            costs: CardCosts::energy(1),
+        };
+        let mut registry = StaticRegistry::default();
+        registry.orbs.register(test_orb_def());
+        registry.relics.register(test_relic());
+        let mut state = GameState::single_player_test_combat(
+            38,
+            [setup; 2],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 20,
+            }],
+            50,
+            3,
+            1,
+        );
+        add_test_relic(&mut state);
+        let player = state.player_id().unwrap();
+        let player_creature = state.player_creature_id().unwrap();
+        let enemy = state.combat().unwrap().monster_ids()[0];
+        let discarded = state.combat().unwrap().player.piles.hand[0];
+        state.combat_mut().unwrap().player.energy = 0;
+
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::ChannelOrb {
+            player,
+            orb: TEST_ORB,
+            source: None,
+        });
+        resolver.enqueue(Effect::ApplyPower {
+            target: enemy,
+            power: POISON_POWER,
+            amount: Decimal::from(1),
+            source: Some(Source::Creature(player_creature)),
+        });
+        resolver.enqueue(Effect::DiscardCards {
+            player,
+            cards: vec![discarded],
+            kind: DiscardKind::Manual,
+            then_draw: 1,
+        });
+
+        let StepResult::Done(log) = resolver.drain(&mut state, &registry) else {
+            panic!("combined setup should finish");
+        };
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::EventTriggered(Event::CardDiscarded(event))
+                if event.kind == DiscardKind::Manual
+        )));
+        assert_eq!(state.power_amount(enemy, POISON_POWER), 2);
+        assert_eq!(state.combat().unwrap().player.piles.hand.len(), 1);
+
+        let orb = state.combat().unwrap().player.orb_queue.orbs[0];
+        resolver.enqueue(Effect::TriggerOrbPassive {
+            orb,
+            trigger: OrbTrigger::AfterTurnStart,
+            target: None,
+        });
+        resolver.enqueue(Effect::Trigger(Event::TurnStarted {
+            side: crate::core::state::Side::Monsters,
+        }));
+        assert!(matches!(
+            resolver.drain(&mut state, &registry),
+            StepResult::Done(_)
+        ));
+
+        assert_eq!(state.combat().unwrap().player.energy, 2);
+        assert_eq!(state.creature(enemy).unwrap().hp, 18);
+        assert_eq!(state.power_amount(enemy, POISON_POWER), 1);
     }
 
     #[test]

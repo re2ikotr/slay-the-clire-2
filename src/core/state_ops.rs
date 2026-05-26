@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 
-use crate::core::ids::{CardId, CardInstanceId, CreatureId, PlayerId, PowerId, PowerInstanceId};
+use crate::core::ids::{
+    CardId, CardInstanceId, CreatureId, OrbId, OrbInstanceId, PlayerId, PowerId, PowerInstanceId,
+};
 use crate::core::state::{
-    decimal_to_i32_trunc, CardCosts, CardCounter, CardFlags, CardInstance, GameState, PileId,
-    PileKind, PowerInstance, ResourceKind, Side, StateError, TemporaryCardCosts, MAX_CARDS_IN_HAND,
+    decimal_to_i32_trunc, CardCosts, CardCounter, CardFlags, CardInstance, GameState, OrbInstance,
+    PileId, PileKind, PowerInstance, ResourceKind, Side, StateError, TemporaryCardCosts,
+    MAX_CARDS_IN_HAND, MAX_ORB_SLOTS,
 };
 
 impl GameState {
@@ -47,6 +50,10 @@ impl GameState {
 
     pub fn card_mut(&mut self, id: CardInstanceId) -> Option<&mut CardInstance> {
         self.combat.as_mut()?.cards.get_mut(&id)
+    }
+
+    pub fn orb(&self, id: OrbInstanceId) -> Option<&OrbInstance> {
+        self.combat.as_ref()?.orbs.get(&id)
     }
 
     pub fn card_is_in_pile(&self, id: CardInstanceId, pile: PileKind) -> bool {
@@ -102,6 +109,17 @@ impl GameState {
         Ok(match resource {
             ResourceKind::Energy => combat.player.energy,
             ResourceKind::Stars => combat.player.stars,
+        })
+    }
+
+    pub fn orb_owner_creature(&self, orb: OrbInstanceId) -> Option<CreatureId> {
+        let owner = self.orb(orb)?.owner;
+        self.combat.as_ref().and_then(|combat| {
+            if combat.player.id == owner {
+                Some(combat.player.creature)
+            } else {
+                None
+            }
         })
     }
 
@@ -319,6 +337,82 @@ impl GameState {
         Ok(*value)
     }
 
+    pub fn add_orb_slots(&mut self, player: PlayerId, amount: u8) -> Result<u8, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+
+        let before = combat.player.orb_queue.slots;
+        combat.player.orb_queue.slots = combat
+            .player
+            .orb_queue
+            .slots
+            .saturating_add(amount)
+            .min(MAX_ORB_SLOTS);
+        Ok(combat.player.orb_queue.slots - before)
+    }
+
+    pub fn remove_orb_slots(&mut self, player: PlayerId, amount: u8) -> Result<u8, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+
+        let before = combat.player.orb_queue.slots;
+        combat.player.orb_queue.slots = combat.player.orb_queue.slots.saturating_sub(amount);
+        while combat.player.orb_queue.orbs.len() > usize::from(combat.player.orb_queue.slots) {
+            let Some(orb) = combat.player.orb_queue.orbs.pop() else {
+                break;
+            };
+            combat.orbs.remove(&orb);
+        }
+        Ok(before - combat.player.orb_queue.slots)
+    }
+
+    pub fn channel_orb(
+        &mut self,
+        player: PlayerId,
+        def: OrbId,
+    ) -> Result<OrbInstanceId, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+
+        if !combat.player.orb_queue.has_room() {
+            return Err(StateError::NoOrbSlot(player));
+        }
+
+        let id = combat.alloc_orb_instance_id();
+        combat.orbs.insert(
+            id,
+            OrbInstance {
+                id,
+                def,
+                owner: player,
+            },
+        );
+        combat.player.orb_queue.orbs.push(id);
+        Ok(id)
+    }
+
+    pub fn remove_orb(&mut self, orb: OrbInstanceId) -> Result<OrbInstance, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let instance = combat
+            .orbs
+            .remove(&orb)
+            .ok_or(StateError::UnknownOrb(orb))?;
+        if combat.player.id == instance.owner {
+            combat
+                .player
+                .orb_queue
+                .orbs
+                .retain(|existing| *existing != orb);
+        }
+        Ok(instance)
+    }
+
     pub fn shuffle_discard_into_draw_if_needed(
         &mut self,
         player: PlayerId,
@@ -445,6 +539,21 @@ impl GameState {
         );
         combat.creatures[target_index].powers.push(id);
         Ok((id, amount))
+    }
+
+    pub fn add_power_amount(
+        &mut self,
+        power: PowerInstanceId,
+        amount: Decimal,
+    ) -> Result<(CreatureId, PowerId, i32), StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let instance = combat
+            .powers
+            .get_mut(&power)
+            .ok_or(StateError::UnknownPower(power))?;
+        let delta = decimal_to_i32_trunc(amount);
+        instance.amount += delta;
+        Ok((instance.owner, instance.def, delta))
     }
 
     pub fn remove_power(&mut self, power: PowerInstanceId) -> Result<(), StateError> {

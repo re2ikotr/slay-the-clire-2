@@ -2,7 +2,9 @@ use crate::core::effect::Effect;
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey};
 use crate::core::query::{
-    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, ResourceCostCalc,
+    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, HpLossCalc,
+    OrbPassiveTriggerCountCalc, OrbValueCalc, PowerAmountCalc, ResourceCostCalc, SummonAmountCalc,
+    UnblockedDamageTargetCalc,
 };
 use crate::core::rules::RuleCtx;
 use crate::core::state::{CardCosts, GameState};
@@ -13,11 +15,28 @@ pub type CardPlayFn =
 pub type CardEventFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, &Event) -> Vec<Effect>;
 pub type CardModifyDamageFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, DamageCalc) -> DamageCalc;
 pub type CardModifyBlockFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, BlockCalc) -> BlockCalc;
+pub type CardModifyHpLossFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, HpLossCalc) -> HpLossCalc;
+pub type CardModifyUnblockedDamageTargetFn = for<'a> fn(
+    &RuleCtx<'a>,
+    CardInstanceId,
+    UnblockedDamageTargetCalc,
+) -> UnblockedDamageTargetCalc;
 pub type CardModifyResourceCostFn =
     for<'a> fn(&RuleCtx<'a>, CardInstanceId, ResourceCostCalc) -> ResourceCostCalc;
 pub type CardModifyResultPileFn =
     for<'a> fn(&RuleCtx<'a>, CardInstanceId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
 pub type CardDecisionFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, &DecisionQuery) -> Decision;
+pub type CardModifyPowerAmountFn =
+    for<'a> fn(&RuleCtx<'a>, CardInstanceId, PowerAmountCalc) -> PowerAmountCalc;
+pub type CardModifyOrbPassiveCountFn = for<'a> fn(
+    &RuleCtx<'a>,
+    CardInstanceId,
+    OrbPassiveTriggerCountCalc,
+) -> OrbPassiveTriggerCountCalc;
+pub type CardModifyOrbValueFn =
+    for<'a> fn(&RuleCtx<'a>, CardInstanceId, OrbValueCalc) -> OrbValueCalc;
+pub type CardModifySummonAmountFn =
+    for<'a> fn(&RuleCtx<'a>, CardInstanceId, SummonAmountCalc) -> SummonAmountCalc;
 
 #[derive(Clone)]
 pub struct CardDef {
@@ -63,8 +82,14 @@ pub struct CardRules {
     pub modify_damage_cap: Option<CardModifyDamageFn>,
     pub modify_block_additive: Option<CardModifyBlockFn>,
     pub modify_block_multiplicative: Option<CardModifyBlockFn>,
+    pub modify_hp_loss: Option<CardModifyHpLossFn>,
+    pub modify_unblocked_damage_target: Option<CardModifyUnblockedDamageTargetFn>,
     pub modify_resource_cost: Option<CardModifyResourceCostFn>,
     pub modify_card_play_result_pile: Option<CardModifyResultPileFn>,
+    pub modify_power_amount: Option<CardModifyPowerAmountFn>,
+    pub modify_orb_passive_trigger_count: Option<CardModifyOrbPassiveCountFn>,
+    pub modify_orb_value: Option<CardModifyOrbValueFn>,
+    pub modify_summon_amount: Option<CardModifySummonAmountFn>,
     pub decide: Option<CardDecisionFn>,
 }
 

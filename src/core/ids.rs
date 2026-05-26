@@ -48,4 +48,5 @@ static_id_type!(PowerId);
 static_id_type!(RelicId);
 static_id_type!(PotionId);
 static_id_type!(MonsterId);
+static_id_type!(OrbId);
 static_id_type!(LocKey);
