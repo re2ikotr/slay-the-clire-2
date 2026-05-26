@@ -219,6 +219,12 @@ impl Creature {
         self.model = Some(model);
         self
     }
+
+    /// HP can reach zero before death effects finish resolving; such creatures
+    /// should already be skipped for targeting and further damage.
+    pub fn is_hittable(&self) -> bool {
+        self.alive && self.hp > 0
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

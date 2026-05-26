@@ -71,11 +71,13 @@ impl Localization {
             (Language::Eng, CardType::Power) => "power",
             (Language::Eng, CardType::Status) => "status",
             (Language::Eng, CardType::Curse) => "curse",
+            (Language::Eng, CardType::Quest) => "quest",
             (Language::Zhs, CardType::Attack) => "攻击",
             (Language::Zhs, CardType::Skill) => "技能",
             (Language::Zhs, CardType::Power) => "能力",
             (Language::Zhs, CardType::Status) => "状态",
             (Language::Zhs, CardType::Curse) => "诅咒",
+            (Language::Zhs, CardType::Quest) => "任务",
         }
     }
 
@@ -86,15 +88,23 @@ impl Localization {
             (Language::Eng, TargetType::AllEnemies) => "all enemies",
             (Language::Eng, TargetType::RandomEnemy) => "random enemy",
             (Language::Eng, TargetType::SelfTarget) => "self",
+            (Language::Eng, TargetType::AnyPlayer) => "player",
             (Language::Eng, TargetType::AnyAlly) => "ally",
+            (Language::Eng, TargetType::AllAllies) => "all allies",
             (Language::Eng, TargetType::AnyCreature) => "any creature",
+            (Language::Eng, TargetType::TargetedNoCreature) => "target",
+            (Language::Eng, TargetType::Osty) => "osty",
             (Language::Zhs, TargetType::None) => "无",
             (Language::Zhs, TargetType::Enemy) => "敌人",
             (Language::Zhs, TargetType::AllEnemies) => "全体敌人",
             (Language::Zhs, TargetType::RandomEnemy) => "随机敌人",
             (Language::Zhs, TargetType::SelfTarget) => "自身",
+            (Language::Zhs, TargetType::AnyPlayer) => "玩家",
             (Language::Zhs, TargetType::AnyAlly) => "友方",
+            (Language::Zhs, TargetType::AllAllies) => "全体友方",
             (Language::Zhs, TargetType::AnyCreature) => "任意单位",
+            (Language::Zhs, TargetType::TargetedNoCreature) => "目标",
+            (Language::Zhs, TargetType::Osty) => "奥斯蒂",
         }
     }
 
@@ -137,6 +147,9 @@ impl Localization {
             (Language::Eng, CardKeyword::Temporary) => "Temporary",
             (Language::Eng, CardKeyword::PurgeOnUse) => "Purge",
             (Language::Eng, CardKeyword::FreeThisTurn) => "Free this turn",
+            (Language::Eng, CardKeyword::Retain) => "Retain",
+            (Language::Eng, CardKeyword::Sly) => "Sly",
+            (Language::Eng, CardKeyword::Eternal) => "Eternal",
             (Language::Zhs, CardKeyword::Exhaust) => "消耗",
             (Language::Zhs, CardKeyword::Innate) => "固有",
             (Language::Zhs, CardKeyword::Unplayable) => "不能打出",
@@ -144,6 +157,9 @@ impl Localization {
             (Language::Zhs, CardKeyword::Temporary) => "临时",
             (Language::Zhs, CardKeyword::PurgeOnUse) => "使用后移除",
             (Language::Zhs, CardKeyword::FreeThisTurn) => "本回合免费",
+            (Language::Zhs, CardKeyword::Retain) => "保留",
+            (Language::Zhs, CardKeyword::Sly) => "机敏",
+            (Language::Zhs, CardKeyword::Eternal) => "永恒",
         }
     }
 
@@ -296,6 +312,7 @@ const UI_TEXT: &[LocalizedEntry] = &[
     LocalizedEntry { key: "status.combat_ended", eng: "combat ended", zhs: "战斗结束" },
     LocalizedEntry { key: "status.rejected", eng: "rejected", zhs: "被拒绝" },
     LocalizedEntry { key: "status.failed", eng: "failed", zhs: "失败" },
+    LocalizedEntry { key: "choice.exhaust_card", eng: "Choose a card to Exhaust.", zhs: "选择1张牌消耗。" },
     LocalizedEntry { key: "unit.log_entries", eng: "log entries", zhs: "条日志" },
     LocalizedEntry { key: "error.card_index_starts_at_one", eng: "card index starts at 1", zhs: "手牌序号从 1 开始" },
     LocalizedEntry { key: "error.monster_index_starts_at_one", eng: "monster index starts at 1", zhs: "怪物序号从 1 开始" },

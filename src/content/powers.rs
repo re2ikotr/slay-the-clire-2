@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
 
-use crate::content::cards::CardType;
+use crate::content::cards::{CardTag, CardType};
 use crate::core::effect::{DamageKind, Effect, Source};
 use crate::core::event::Event;
 use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
@@ -634,7 +634,13 @@ fn hellraiser_on_event(ctx: &RuleCtx<'_>, _power: PowerInstanceId, event: &Event
     let Some(card) = ctx.state.card(event.card) else {
         return Vec::new();
     };
-    if !card.def.as_str().contains("STRIKE") {
+    let is_strike = ctx
+        .registry
+        .cards
+        .get(card.def)
+        .map(|def| def.has_tag(CardTag::Strike))
+        .unwrap_or(false);
+    if !is_strike {
         return Vec::new();
     }
     let target = ctx.state.alive_monster_ids().first().copied();
@@ -972,4 +978,103 @@ fn power_instance<'a>(
     power: PowerInstanceId,
 ) -> Option<&'a crate::core::state::PowerInstance> {
     ctx.state.combat()?.powers.get(&power)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::cards::{
+        CardDef, CardPlayCtx, CardPoolId, CardRarity, CardRules, TargetType,
+    };
+    use crate::core::event::CardDrawn;
+    use crate::core::ids::{CardId, CardInstanceId, CreatureId};
+    use crate::core::state::{CardCosts, CombatSetupCard, CombatSetupMonster, GameState};
+    use crate::registry::StaticRegistry;
+
+    const TEST_STRIKE_TAGS: &[CardTag] = &[CardTag::Strike];
+    const TEST_NO_TAGS: &[CardTag] = &[];
+
+    fn test_card_play(
+        _: &CardPlayCtx<'_>,
+        _: CardInstanceId,
+        _: Option<CreatureId>,
+    ) -> Vec<Effect> {
+        Vec::new()
+    }
+
+    fn test_card_def(id: CardId, tags: &'static [CardTag]) -> CardDef {
+        CardDef {
+            id,
+            loc_key: LocKey::new("card.test"),
+            pool: CardPoolId::Ironclad,
+            card_type: CardType::Attack,
+            rarity: CardRarity::Common,
+            target: TargetType::Enemy,
+            base_costs: CardCosts::energy(1),
+            upgraded_costs: None,
+            keywords: &[],
+            upgraded_keywords: &[],
+            tags,
+            can_generate_in_combat: true,
+            play: test_card_play,
+            rules: CardRules::default(),
+        }
+    }
+
+    fn hellraiser_effects_for(card_def: CardDef) -> Vec<Effect> {
+        let mut registry = StaticRegistry::empty();
+        registry.cards.register(card_def.clone());
+        let state = GameState::single_player_test_combat(
+            1,
+            [CombatSetupCard {
+                def: card_def.id,
+                upgraded: false,
+                costs: CardCosts::energy(1),
+            }],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 30,
+            }],
+            80,
+            3,
+            1,
+        );
+        let combat = state.combat().expect("combat exists");
+        let ctx = RuleCtx {
+            state: &state,
+            registry: &registry,
+            listener: None,
+        };
+
+        hellraiser_on_event(
+            &ctx,
+            PowerInstanceId::new(1),
+            &Event::CardDrawn(CardDrawn {
+                player: combat.player.id,
+                card: combat.player.piles.hand[0],
+                from_hand_draw: false,
+            }),
+        )
+    }
+
+    #[test]
+    fn hellraiser_uses_strike_tag_when_card_id_does_not_contain_strike() {
+        let effects =
+            hellraiser_effects_for(test_card_def(CardId::new("TEST_BLADE"), TEST_STRIKE_TAGS));
+
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ExecuteCardBody { .. }]
+        ));
+    }
+
+    #[test]
+    fn hellraiser_ignores_strike_named_cards_without_strike_tag() {
+        let effects = hellraiser_effects_for(test_card_def(
+            CardId::new("TEST_STRIKE_NAMED_ONLY"),
+            TEST_NO_TAGS,
+        ));
+
+        assert!(effects.is_empty());
+    }
 }

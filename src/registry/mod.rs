@@ -145,7 +145,7 @@ impl StaticRegistry {
 
     pub fn standard() -> Self {
         let mut registry = Self::empty();
-        crate::content::cards::register_ironclad_cards(&mut registry.cards);
+        crate::content::cards::register_all_cards(&mut registry.cards);
         crate::content::powers::register_core_powers(&mut registry.powers);
         registry
             .monsters

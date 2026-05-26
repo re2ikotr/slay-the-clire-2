@@ -151,13 +151,22 @@ pub enum Effect {
         to: PileId,
         reason: MoveReason,
     },
+    SelectHandCards {
+        player: PlayerId,
+        filter: CardFilter,
+        min: usize,
+        max: usize,
+        prompt: LocKey,
+        source: Option<Source>,
+        on_resolve: ChoiceAction,
+    },
     CheckDeaths,
     CheckCombatEnd,
     StartTurn(Side),
     EndTurn(Side),
     EnterPhase(CombatPhase),
     RequestChoice(ChoiceRequest),
-    ResolveChoice(ChoiceId),
+    ResolveChoice(ChoiceResolution),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +265,9 @@ pub struct ChoiceRequest {
     pub kind: ChoiceKind,
     pub source: Option<Source>,
     pub prompt: LocKey,
+    pub min: usize,
+    pub max: usize,
+    pub on_resolve: ChoiceAction,
     pub options: Vec<ChoiceOption>,
 }
 
@@ -271,5 +283,31 @@ pub enum ChoiceKind {
 pub struct ChoiceOption {
     pub id: ChoiceId,
     pub loc_key: LocKey,
+    pub value: ChoiceValue,
     pub enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceValue {
+    Card(CardInstanceId),
+    Target(CreatureId),
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceAction {
+    None,
+    ExhaustSelectedCards,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChoiceResponse {
+    pub request: ChoiceId,
+    pub options: Vec<ChoiceId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChoiceResolution {
+    pub request: ChoiceRequest,
+    pub selected: Vec<ChoiceOption>,
 }
