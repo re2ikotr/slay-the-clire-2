@@ -1,18 +1,19 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use rust_decimal::Decimal;
 
 use crate::content::cards::{CardKeyword, CardPlayCtx, CardType, TargetType};
 use crate::core::command::CommandError;
 use crate::core::effect::{
-    CardFilter, DamageOp, DamageResult, Effect, MoveReason, Source, UpgradeMode,
+    CardFilter, ChoiceAction, ChoiceKind, ChoiceOption, ChoiceResolution, ChoiceResponse,
+    ChoiceValue, DamageOp, DamageResult, Effect, MoveReason, Source, UpgradeMode,
 };
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
     BlockGained, CardDrawn, CardExhausted, CardPlayed, CardUpgraded, CardsShuffled,
     CreatureHpChanged, Event, PowerApplied, ResourceChanged,
 };
-use crate::core::ids::{CardInstanceId, ChoiceId, CreatureId, PlayerId};
+use crate::core::ids::{CardInstanceId, ChoiceId, CreatureId, LocKey, PlayerId};
 use crate::core::listener::ListenerRef;
 use crate::core::log::{LogEntry, StateChange};
 use crate::core::query::{
@@ -34,6 +35,7 @@ pub struct EffectResolver {
     last_card_payment: std::collections::BTreeMap<crate::core::ids::CardInstanceId, CardPayment>,
     pending_card_results:
         std::collections::BTreeMap<crate::core::ids::CardInstanceId, CardPlayResult>,
+    next_choice: u32,
 }
 
 impl EffectResolver {
@@ -49,24 +51,71 @@ impl EffectResolver {
         self.pending_choice.is_some()
     }
 
-    pub fn submit_choice(&mut self, choice: ChoiceId) -> Result<(), CommandError> {
+    pub fn pending_choice(&self) -> Option<&crate::core::effect::ChoiceRequest> {
+        self.pending_choice.as_ref()
+    }
+
+    pub fn submit_choice(&mut self, response: ChoiceResponse) -> Result<(), CommandError> {
         let pending = self
             .pending_choice
-            .take()
+            .as_ref()
             .ok_or(CommandError::UnexpectedChoice)?;
-        if pending.id != choice {
-            self.pending_choice = Some(pending.clone());
+        if pending.id != response.request {
             return Err(CommandError::ChoiceMismatch {
                 expected: pending.id,
-                actual: choice,
+                actual: response.request,
             });
         }
-        self.enqueue(Effect::ResolveChoice(choice));
+
+        let actual = response.options.len();
+        if actual < pending.min || actual > pending.max {
+            return Err(CommandError::ChoiceCountOutOfRange {
+                min: pending.min,
+                max: pending.max,
+                actual,
+            });
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut selected = Vec::with_capacity(response.options.len());
+        for option_id in response.options {
+            if !seen.insert(option_id) {
+                return Err(CommandError::DuplicateChoiceOption(option_id));
+            }
+            let Some(option) = pending.options.iter().find(|option| option.id == option_id) else {
+                return Err(CommandError::InvalidChoiceOption(option_id));
+            };
+            if !option.enabled {
+                return Err(CommandError::DisabledChoiceOption(option_id));
+            }
+            selected.push(option.clone());
+        }
+
+        let request = self
+            .pending_choice
+            .take()
+            .expect("pending choice was validated");
+        self.queue
+            .push_front(Effect::ResolveChoice(ChoiceResolution {
+                request,
+                selected,
+            }));
         Ok(())
     }
 
     pub fn take_log(&mut self) -> Vec<LogEntry> {
         std::mem::take(&mut self.log)
+    }
+
+    fn prepare_choice(
+        &mut self,
+        mut choice: crate::core::effect::ChoiceRequest,
+    ) -> crate::core::effect::ChoiceRequest {
+        if choice.id.get() == 0 {
+            self.next_choice += 1;
+            choice.id = ChoiceId::new(self.next_choice);
+        }
+        choice
     }
 
     fn clear_aborted_resolution(&mut self) {
@@ -82,6 +131,7 @@ impl EffectResolver {
             match self.apply_effect(state, registry, effect) {
                 ApplyResult::Continue(more) => self.queue.extend(more),
                 ApplyResult::NeedChoice(choice) => {
+                    let choice = self.prepare_choice(choice);
                     self.pending_choice = Some(choice.clone());
                     self.log.push(LogEntry::ChoiceRequested(choice.clone()));
                     return StepResult::NeedChoice(choice, self.take_log());
@@ -493,6 +543,17 @@ impl EffectResolver {
                         .collect(),
                 )
             }
+            Effect::SelectHandCards {
+                player,
+                filter,
+                min,
+                max,
+                prompt,
+                source,
+                on_resolve,
+            } => self.select_hand_cards(
+                state, registry, player, filter, min, max, prompt, source, on_resolve,
+            ),
             Effect::UpgradeCard { card } => match state.upgrade_card(card) {
                 Ok(true) => {
                     self.log
@@ -714,8 +775,79 @@ impl EffectResolver {
                 Err(error) => ApplyResult::StateError(error),
             },
             Effect::RequestChoice(choice) => ApplyResult::NeedChoice(choice),
-            Effect::ResolveChoice(_) => ApplyResult::Continue(Vec::new()),
+            Effect::ResolveChoice(resolution) => self.resolve_choice(state, registry, resolution),
         }
+    }
+
+    fn select_hand_cards(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        filter: CardFilter,
+        min: usize,
+        max: usize,
+        prompt: LocKey,
+        source: Option<Source>,
+        on_resolve: ChoiceAction,
+    ) -> ApplyResult {
+        let cards = matching_hand_cards(state, registry, player, filter);
+        if cards.is_empty() {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        // C# CardSelectCmd.FromHand auto-selects all valid cards when the
+        // requested count is exact and the available count is not greater.
+        if min == max && cards.len() <= min {
+            let effects = choice_action_effects(on_resolve, cards);
+            return self.apply_immediate_effects(state, registry, effects);
+        }
+
+        let effective_max = max.min(cards.len());
+        let effective_min = min.min(effective_max);
+        if effective_max == 0 {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let options = cards
+            .into_iter()
+            .map(|card| ChoiceOption {
+                id: ChoiceId::new(card.get()),
+                loc_key: card_loc_key(state, registry, card),
+                value: ChoiceValue::Card(card),
+                enabled: true,
+            })
+            .collect();
+
+        ApplyResult::NeedChoice(crate::core::effect::ChoiceRequest {
+            id: ChoiceId::new(0),
+            kind: ChoiceKind::SelectCard,
+            source,
+            prompt,
+            min: effective_min,
+            max: effective_max,
+            on_resolve,
+            options,
+        })
+    }
+
+    fn resolve_choice(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        resolution: ChoiceResolution,
+    ) -> ApplyResult {
+        self.log.push(LogEntry::ChoiceResolved(resolution.clone()));
+        let selected_cards = resolution
+            .selected
+            .iter()
+            .filter_map(|option| match option.value {
+                ChoiceValue::Card(card) => Some(card),
+                ChoiceValue::Target(_) | ChoiceValue::None => None,
+            })
+            .collect::<Vec<_>>();
+        let effects = choice_action_effects(resolution.request.on_resolve, selected_cards);
+        self.apply_immediate_effects(state, registry, effects)
     }
 
     fn apply_damage(
@@ -1363,6 +1495,28 @@ fn matching_hand_cards(
         .collect()
 }
 
+fn card_loc_key(
+    state: &GameState,
+    registry: &StaticRegistry,
+    card: crate::core::ids::CardInstanceId,
+) -> LocKey {
+    state
+        .card(card)
+        .and_then(|card| registry.cards.get(card.def))
+        .map(|def| def.loc_key)
+        .unwrap_or_else(|| LocKey::new("card.UNKNOWN"))
+}
+
+fn choice_action_effects(action: ChoiceAction, cards: Vec<CardInstanceId>) -> Vec<Effect> {
+    match action {
+        ChoiceAction::None => Vec::new(),
+        ChoiceAction::ExhaustSelectedCards => cards
+            .into_iter()
+            .map(|card| Effect::ExhaustCard { card })
+            .collect(),
+    }
+}
+
 fn resolve_card_play_result_pile(
     state: &GameState,
     registry: &StaticRegistry,
@@ -1577,7 +1731,8 @@ mod tests {
     };
     use crate::content::powers::{PowerDef, PowerRules};
     use crate::core::effect::{
-        DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect, Source,
+        CardFilter, ChoiceAction, ChoiceResponse, ChoiceValue, DamageAllEnemiesOp, DamageFlags,
+        DamageKind, DamageOp, Effect, Source,
     };
     use crate::core::engine::{CombatOutcome, Engine, StepResult};
     use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey, PowerId, PowerInstanceId};
@@ -1586,7 +1741,9 @@ mod tests {
         DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
     };
     use crate::core::rules::{prevent_by_current_listener, RuleCtx};
-    use crate::core::state::{CardCost, CardCosts, CombatSetupCard, CombatSetupMonster, GameState};
+    use crate::core::state::{
+        CardCost, CardCosts, CombatSetupCard, CombatSetupMonster, GameState, PileKind,
+    };
     use crate::core::Command;
     use crate::registry::StaticRegistry;
 
@@ -1908,6 +2065,84 @@ mod tests {
         let combat = state.combat().unwrap();
         assert_eq!(combat.player.piles.hand.len(), 10);
         assert_eq!(combat.player.piles.draw.len(), 2);
+    }
+
+    #[test]
+    fn multi_card_choice_preserves_selected_order() {
+        let setup = CombatSetupCard {
+            def: STARTER_STRIKE,
+            upgraded: false,
+            costs: CardCosts::energy(1),
+        };
+        let mut state = GameState::single_player_test_combat(
+            17,
+            [setup; 4],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 10,
+            }],
+            50,
+            3,
+            4,
+        );
+        let player = state.player_id().unwrap();
+        let selected = state.combat().unwrap().player.piles.hand[0..2].to_vec();
+        let mut resolver = EffectResolver::default();
+        resolver.enqueue(Effect::SelectHandCards {
+            player,
+            filter: CardFilter::Any,
+            min: 2,
+            max: 2,
+            prompt: LocKey::new("choice.exhaust_card"),
+            source: None,
+            on_resolve: ChoiceAction::ExhaustSelectedCards,
+        });
+
+        let StepResult::NeedChoice(choice, _) =
+            resolver.drain(&mut state, &StaticRegistry::empty())
+        else {
+            panic!("multi-card selection should request a choice");
+        };
+        assert_eq!(choice.min, 2);
+        assert_eq!(choice.max, 2);
+        let second_option = choice
+            .options
+            .iter()
+            .find(|option| option.value == ChoiceValue::Card(selected[1]))
+            .unwrap()
+            .id;
+        let first_option = choice
+            .options
+            .iter()
+            .find(|option| option.value == ChoiceValue::Card(selected[0]))
+            .unwrap()
+            .id;
+
+        resolver
+            .submit_choice(ChoiceResponse {
+                request: choice.id,
+                options: vec![second_option, first_option],
+            })
+            .unwrap();
+        let StepResult::Done(log) = resolver.drain(&mut state, &StaticRegistry::empty()) else {
+            panic!("choice should resolve");
+        };
+
+        let exhaust = &state.combat().unwrap().player.piles.exhaust;
+        assert_eq!(exhaust.as_slice(), &[selected[1], selected[0]]);
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            LogEntry::ChoiceResolved(resolution)
+                if resolution
+                    .selected
+                    .iter()
+                    .map(|option| option.value)
+                    .collect::<Vec<_>>()
+                    == vec![ChoiceValue::Card(selected[1]), ChoiceValue::Card(selected[0])]
+        )));
+        assert!(selected
+            .iter()
+            .all(|card| !state.card_is_in_pile(*card, PileKind::Hand)));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::core::command::{Command, CommandError};
-use crate::core::effect::{Effect, MoveReason};
+use crate::core::effect::{ChoiceRequest, ChoiceResponse, Effect, MoveReason};
 use crate::core::event::{CardPlayStarted, Event};
 use crate::core::log::LogEntry;
 use crate::core::resolver::EffectResolver;
@@ -28,7 +28,10 @@ impl Engine {
     pub fn step(&mut self, command: Command) -> StepResult {
         if self.resolver.has_pending_choice() {
             return match command {
-                Command::Choose { choice } => match self.resolver.submit_choice(choice) {
+                Command::Choose { request, options } => match self
+                    .resolver
+                    .submit_choice(ChoiceResponse { request, options })
+                {
                     Ok(()) => self.resolver.drain(&mut self.state, &self.registry),
                     Err(error) => StepResult::Rejected(error, self.resolver.take_log()),
                 },
@@ -47,6 +50,10 @@ impl Engine {
             }
             Err(error) => StepResult::Rejected(error, self.resolver.take_log()),
         }
+    }
+
+    pub fn pending_choice(&self) -> Option<&ChoiceRequest> {
+        self.resolver.pending_choice()
     }
 }
 
@@ -163,9 +170,10 @@ mod tests {
 
     use crate::content::cards::{
         BASH, BATTLE_TRANCE, BLOODLETTING, DEFEND_IRONCLAD, POMMEL_STRIKE, STRIKE_IRONCLAD,
+        TRUE_GRIT,
     };
     use crate::content::powers::{CORRUPTION_POWER, NO_DRAW_POWER, VULNERABLE};
-    use crate::core::effect::Effect;
+    use crate::core::effect::{ChoiceValue, Effect};
     use crate::core::event::Event;
     use crate::core::ids::CardId;
     use crate::core::ids::{CardInstanceId, CreatureId};
@@ -472,6 +480,74 @@ mod tests {
             entry,
             LogEntry::EventTriggered(Event::CardExhausted(event)) if event.card == defend
         )));
+    }
+
+    #[test]
+    fn upgraded_true_grit_exhausts_chosen_hand_card_before_finishing_play() {
+        let mut engine = Engine::new(GameState::basic_nibbit_combat(136));
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        let true_grit = add_card_to_hand(&mut engine, TRUE_GRIT, true);
+        let strike = add_card_to_hand(&mut engine, STRIKE_IRONCLAD, false);
+        let defend = add_card_to_hand(&mut engine, DEFEND_IRONCLAD, false);
+
+        let StepResult::NeedChoice(choice, _) = engine.step(Command::PlayCard {
+            player,
+            card: true_grit,
+            target: None,
+        }) else {
+            panic!("upgraded true grit should request a card choice");
+        };
+
+        assert_eq!(choice.min, 1);
+        assert_eq!(choice.max, 1);
+        assert_eq!(
+            choice.source,
+            Some(crate::core::effect::Source::Card(true_grit))
+        );
+        assert!(!choice
+            .options
+            .iter()
+            .any(|option| option.value == ChoiceValue::Card(true_grit)));
+        assert!(choice
+            .options
+            .iter()
+            .any(|option| option.value == ChoiceValue::Card(strike)));
+        let defend_option = choice
+            .options
+            .iter()
+            .find(|option| option.value == ChoiceValue::Card(defend))
+            .unwrap()
+            .id;
+
+        let StepResult::Done(log) = engine.step(Command::Choose {
+            request: choice.id,
+            options: vec![defend_option],
+        }) else {
+            panic!("selected true grit card should resolve");
+        };
+
+        let combat = engine.state.combat().unwrap();
+        assert_eq!(engine.state.creature(player_creature).unwrap().block, 9);
+        assert!(combat.player.piles.hand.contains(&strike));
+        assert!(!combat.player.piles.hand.contains(&defend));
+        assert!(combat.player.piles.exhaust.contains(&defend));
+        assert!(combat.player.piles.discard.contains(&true_grit));
+        assert!(!combat.player.piles.exhaust.contains(&true_grit));
+        let choice_resolved = log.iter().position(|entry| {
+            matches!(
+                entry,
+                LogEntry::ChoiceResolved(resolution)
+                    if resolution.selected.len() == 1
+                        && resolution.selected[0].value == ChoiceValue::Card(defend)
+            )
+        });
+        let card_played = log
+            .iter()
+            .position(|entry| matches!(entry, LogEntry::EventTriggered(Event::CardPlayed(_))));
+        assert!(choice_resolved
+            .zip(card_played)
+            .is_some_and(|(choice, played)| choice < played));
     }
 
     #[test]

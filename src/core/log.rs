@@ -14,6 +14,7 @@ pub enum LogEntry {
     CardPlayResultPileModified(CardPlayResultPileModifierLog),
     DecisionMade(Decision),
     ChoiceRequested(crate::core::effect::ChoiceRequest),
+    ChoiceResolved(crate::core::effect::ChoiceResolution),
     CombatEnded(CombatResult),
     Error(StateError),
 }

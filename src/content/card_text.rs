@@ -512,7 +512,11 @@ fn describe_lines(ctx: &CardTextCtx<'_>, card: CardInstanceId) -> Vec<CardTextLi
         TREMBLE => vec![apply_power("Vulnerable", "易伤", val(ctx, card, 3, 1))],
         TRUE_GRIT => vec![
             block(ctx, card, 7, 2),
-            l("Exhaust 1 random card in your hand.", "随机消耗你手牌中的1张牌。"),
+            if upgraded(ctx, card) {
+                l("Exhaust 1 card in your hand.", "消耗你手牌中的1张牌。")
+            } else {
+                l("Exhaust 1 random card in your hand.", "随机消耗你手牌中的1张牌。")
+            },
         ],
         TWIN_STRIKE => vec![damage_times(ctx, card, 5, 2, 2)],
         UNMOVABLE => vec![l("Block gained from cards is doubled.", "从卡牌获得的格挡翻倍。")],

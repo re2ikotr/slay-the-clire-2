@@ -19,7 +19,8 @@ pub enum Command {
         target: Option<CreatureId>,
     },
     Choose {
-        choice: ChoiceId,
+        request: ChoiceId,
+        options: Vec<ChoiceId>,
     },
 }
 
@@ -32,6 +33,14 @@ pub enum CommandError {
         expected: ChoiceId,
         actual: ChoiceId,
     },
+    ChoiceCountOutOfRange {
+        min: usize,
+        max: usize,
+        actual: usize,
+    },
+    InvalidChoiceOption(ChoiceId),
+    DisabledChoiceOption(ChoiceId),
+    DuplicateChoiceOption(ChoiceId),
     InvalidPhase,
     InvalidCard(CardInstanceId),
     Prevented(PreventReason),
@@ -49,6 +58,17 @@ impl fmt::Display for CommandError {
                     "choice mismatch: expected {:?}, got {:?}",
                     expected, actual
                 )
+            }
+            Self::ChoiceCountOutOfRange { min, max, actual } => write!(
+                f,
+                "choice selected {actual} options, expected between {min} and {max}"
+            ),
+            Self::InvalidChoiceOption(option) => write!(f, "invalid choice option: {:?}", option),
+            Self::DisabledChoiceOption(option) => {
+                write!(f, "disabled choice option: {:?}", option)
+            }
+            Self::DuplicateChoiceOption(option) => {
+                write!(f, "duplicate choice option: {:?}", option)
             }
             Self::InvalidPhase => write!(f, "command is not valid in the current phase"),
             Self::InvalidCard(card) => write!(f, "invalid card: {:?}", card),

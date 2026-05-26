@@ -2,8 +2,8 @@ use rust_decimal::Decimal;
 
 use crate::content::powers::*;
 use crate::core::effect::{
-    CardFilter, DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect, MoveReason,
-    RandomDamageOp, Source, UpgradeMode,
+    CardFilter, ChoiceAction, DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect,
+    MoveReason, RandomDamageOp, Source, UpgradeMode,
 };
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey};
@@ -1336,7 +1336,7 @@ const IRONCLAD_CARD_SPECS: &[CardSpec] = &[
         SelfTarget,
         CardCosts::energy(1),
         None,
-        KW_EXHAUST,
+        KW_NONE,
         KW_NONE,
         TAG_NONE,
         true,
@@ -2585,10 +2585,22 @@ fn true_grit_play(
         return Vec::new();
     };
     let mut effects = block_self(ctx, card, 7, 2);
-    effects.push(Effect::ExhaustRandomHand {
-        player,
-        filter: CardFilter::Any,
-    });
+    if is_upgraded(ctx, card) {
+        effects.push(Effect::SelectHandCards {
+            player,
+            filter: CardFilter::Any,
+            min: 1,
+            max: 1,
+            prompt: LocKey::new("choice.exhaust_card"),
+            source: Some(Source::Card(card)),
+            on_resolve: ChoiceAction::ExhaustSelectedCards,
+        });
+    } else {
+        effects.push(Effect::ExhaustRandomHand {
+            player,
+            filter: CardFilter::Any,
+        });
+    }
     effects
 }
 

@@ -296,6 +296,7 @@ const UI_TEXT: &[LocalizedEntry] = &[
     LocalizedEntry { key: "status.combat_ended", eng: "combat ended", zhs: "战斗结束" },
     LocalizedEntry { key: "status.rejected", eng: "rejected", zhs: "被拒绝" },
     LocalizedEntry { key: "status.failed", eng: "failed", zhs: "失败" },
+    LocalizedEntry { key: "choice.exhaust_card", eng: "Choose a card to Exhaust.", zhs: "选择1张牌消耗。" },
     LocalizedEntry { key: "unit.log_entries", eng: "log entries", zhs: "条日志" },
     LocalizedEntry { key: "error.card_index_starts_at_one", eng: "card index starts at 1", zhs: "手牌序号从 1 开始" },
     LocalizedEntry { key: "error.monster_index_starts_at_one", eng: "monster index starts at 1", zhs: "怪物序号从 1 开始" },

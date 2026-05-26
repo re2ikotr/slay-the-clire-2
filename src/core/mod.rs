@@ -16,7 +16,10 @@ mod state_ops;
 
 pub(crate) use combat_setup::build_single_player_combat;
 pub use command::{Command, CommandError};
-pub use effect::{ChoiceRequest, Effect};
+pub use effect::{
+    ChoiceAction, ChoiceOption, ChoiceRequest, ChoiceResolution, ChoiceResponse, ChoiceValue,
+    Effect,
+};
 pub use engine::{CombatOutcome, CombatResult, Engine, StepResult};
 pub use ids::*;
 pub use state::{CardCost, CardCosts, CombatPhase, GameState, ResourceKind, Side};
