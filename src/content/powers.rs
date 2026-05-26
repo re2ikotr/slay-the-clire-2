@@ -983,7 +983,9 @@ fn power_instance<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::cards::{CardDef, CardPlayCtx, CardRarity, CardRules, TargetType};
+    use crate::content::cards::{
+        CardDef, CardPlayCtx, CardPoolId, CardRarity, CardRules, TargetType,
+    };
     use crate::core::event::CardDrawn;
     use crate::core::ids::{CardId, CardInstanceId, CreatureId};
     use crate::core::state::{CardCosts, CombatSetupCard, CombatSetupMonster, GameState};
@@ -1004,6 +1006,7 @@ mod tests {
         CardDef {
             id,
             loc_key: LocKey::new("card.test"),
+            pool: CardPoolId::Ironclad,
             card_type: CardType::Attack,
             rarity: CardRarity::Common,
             target: TargetType::Enemy,

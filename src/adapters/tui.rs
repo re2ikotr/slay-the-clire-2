@@ -359,7 +359,15 @@ fn resolve_target(
         .map(|def| def.target);
 
     match target_type {
-        Some(TargetType::None | TargetType::SelfTarget | TargetType::AnyAlly) => None,
+        Some(
+            TargetType::None
+            | TargetType::SelfTarget
+            | TargetType::AnyPlayer
+            | TargetType::AnyAlly
+            | TargetType::AllAllies
+            | TargetType::TargetedNoCreature
+            | TargetType::Osty,
+        ) => None,
         Some(TargetType::AnyCreature) => explicit_monster.or_else(|| monster_ids.first().copied()),
         Some(TargetType::Enemy) => explicit_monster.or_else(|| monster_ids.first().copied()),
         Some(TargetType::AllEnemies | TargetType::RandomEnemy) => None,

@@ -1,138 +1,29 @@
 use rust_decimal::Decimal;
 
+use super::{
+    CardDef, CardKeyword, CardPlayCtx, CardPlayFn, CardPoolId, CardRarity, CardRules, CardTag,
+    CardType, TargetType,
+};
 use crate::content::powers::*;
 use crate::core::effect::{
     CardFilter, ChoiceAction, DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect,
     MoveReason, RandomDamageOp, Source, UpgradeMode,
 };
-use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey};
-use crate::core::query::{
-    BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind,
-    PreventReason, ResourceCostCalc,
-};
+use crate::core::query::{Decision, DecisionQuery, DecisionQueryKind, PreventReason};
 use crate::core::rules::{prevent_by_current_listener, RuleCtx};
-use crate::core::state::{CardCosts, CardCounter, GameState, PileId, PileKind, ResourceKind};
-use crate::registry::{DefRegistry, StaticRegistry};
-
-pub type CardPlayFn =
-    for<'a> fn(&CardPlayCtx<'a>, CardInstanceId, Option<CreatureId>) -> Vec<Effect>;
-pub type CardEventFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, &Event) -> Vec<Effect>;
-pub type CardModifyDamageFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, DamageCalc) -> DamageCalc;
-pub type CardModifyBlockFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, BlockCalc) -> BlockCalc;
-pub type CardModifyResourceCostFn =
-    for<'a> fn(&RuleCtx<'a>, CardInstanceId, ResourceCostCalc) -> ResourceCostCalc;
-pub type CardModifyResultPileFn =
-    for<'a> fn(&RuleCtx<'a>, CardInstanceId, CardPlayResultPileCalc) -> CardPlayResultPileCalc;
-pub type CardDecisionFn = for<'a> fn(&RuleCtx<'a>, CardInstanceId, &DecisionQuery) -> Decision;
-
-#[derive(Clone)]
-pub struct CardDef {
-    pub id: CardId,
-    pub loc_key: LocKey,
-    pub card_type: CardType,
-    pub rarity: CardRarity,
-    pub target: TargetType,
-    pub base_costs: CardCosts,
-    pub upgraded_costs: Option<CardCosts>,
-    pub keywords: &'static [CardKeyword],
-    pub upgraded_keywords: &'static [CardKeyword],
-    pub tags: &'static [CardTag],
-    pub can_generate_in_combat: bool,
-    pub play: CardPlayFn,
-    pub rules: CardRules,
-}
-
-impl CardDef {
-    pub fn costs_for(&self, upgraded: bool) -> CardCosts {
-        if upgraded {
-            self.upgraded_costs.unwrap_or(self.base_costs)
-        } else {
-            self.base_costs
-        }
-    }
-
-    pub fn has_keyword(&self, upgraded: bool, keyword: CardKeyword) -> bool {
-        self.keywords.contains(&keyword) || (upgraded && self.upgraded_keywords.contains(&keyword))
-    }
-
-    pub fn has_tag(&self, tag: CardTag) -> bool {
-        self.tags.contains(&tag)
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct CardRules {
-    pub on_event: Option<CardEventFn>,
-    pub modify_damage_additive: Option<CardModifyDamageFn>,
-    pub modify_damage_multiplicative: Option<CardModifyDamageFn>,
-    pub modify_damage_cap: Option<CardModifyDamageFn>,
-    pub modify_block_additive: Option<CardModifyBlockFn>,
-    pub modify_block_multiplicative: Option<CardModifyBlockFn>,
-    pub modify_resource_cost: Option<CardModifyResourceCostFn>,
-    pub modify_card_play_result_pile: Option<CardModifyResultPileFn>,
-    pub decide: Option<CardDecisionFn>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CardType {
-    Attack,
-    Skill,
-    Power,
-    Status,
-    Curse,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CardRarity {
-    Basic,
-    Common,
-    Uncommon,
-    Rare,
-    Ancient,
-    Special,
-    Token,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TargetType {
-    None,
-    Enemy,
-    AllEnemies,
-    RandomEnemy,
-    SelfTarget,
-    AnyAlly,
-    AnyCreature,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CardKeyword {
-    Exhaust,
-    Innate,
-    Unplayable,
-    Ethereal,
-    Temporary,
-    PurgeOnUse,
-    FreeThisTurn,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CardTag {
-    Strike,
-    Defend,
-}
-
-pub struct CardPlayCtx<'a> {
-    pub state: &'a GameState,
-    pub registry: &'a StaticRegistry,
-    pub paid_energy: i32,
-    pub paid_stars: i32,
-}
+#[cfg(test)]
+use crate::core::state::GameState;
+use crate::core::state::{CardCosts, CardCounter, PileId, PileKind, ResourceKind};
+use crate::registry::DefRegistry;
+#[cfg(test)]
+use crate::registry::StaticRegistry;
 
 #[derive(Clone, Copy)]
 struct CardSpec {
     id: CardId,
     loc_key: LocKey,
+    pool: CardPoolId,
     card_type: CardType,
     rarity: CardRarity,
     target: TargetType,
@@ -150,6 +41,7 @@ impl CardSpec {
         CardDef {
             id: self.id,
             loc_key: self.loc_key,
+            pool: self.pool,
             card_type: self.card_type,
             rarity: self.rarity,
             target: self.target,
@@ -271,9 +163,29 @@ card_ids! {
 
 macro_rules! spec {
     ($id:ident, $type:ident, $rarity:ident, $target:ident, $cost:expr, $upcost:expr, $kw:expr, $upkw:expr, $tags:expr, $gen:expr, $play:ident) => {
+        card_spec_with_pool!(
+            CardPoolId::Ironclad,
+            $id,
+            $type,
+            $rarity,
+            $target,
+            $cost,
+            $upcost,
+            $kw,
+            $upkw,
+            $tags,
+            $gen,
+            $play
+        )
+    };
+}
+
+macro_rules! card_spec_with_pool {
+    ($pool:expr, $id:ident, $type:ident, $rarity:ident, $target:ident, $cost:expr, $upcost:expr, $kw:expr, $upkw:expr, $tags:expr, $gen:expr, $play:ident) => {
         CardSpec {
             id: $id,
             loc_key: LocKey::new(concat!("card.", stringify!($id))),
+            pool: $pool,
             card_type: CardType::$type,
             rarity: CardRarity::$rarity,
             target: TargetType::$target,
@@ -1422,7 +1334,8 @@ const IRONCLAD_CARD_SPECS: &[CardSpec] = &[
     ),
 ];
 
-const GIANT_ROCK_SPEC: CardSpec = spec!(
+const GIANT_ROCK_SPEC: CardSpec = card_spec_with_pool!(
+    CardPoolId::Token,
     GIANT_ROCK,
     Attack,
     Token,
@@ -1440,11 +1353,14 @@ pub fn register_ironclad_cards(registry: &mut DefRegistry<CardId, CardDef>) {
     for spec in IRONCLAD_CARD_SPECS {
         registry.register(spec.def());
     }
-    registry.register(GIANT_ROCK_SPEC.def());
 }
 
 pub fn ironclad_card_defs() -> Vec<CardDef> {
     IRONCLAD_CARD_SPECS.iter().map(|spec| spec.def()).collect()
+}
+
+pub(crate) fn giant_rock_def() -> CardDef {
+    GIANT_ROCK_SPEC.def()
 }
 
 pub fn strike_ironclad() -> CardDef {
@@ -2904,8 +2820,13 @@ mod tests {
         let registry = StaticRegistry::standard();
         for def in ironclad_card_defs() {
             assert!(registry.cards.contains(def.id), "missing {:?}", def.id);
+            assert_eq!(def.pool, CardPoolId::Ironclad);
         }
         assert!(registry.cards.contains(GIANT_ROCK));
+        assert_eq!(
+            registry.cards.get(GIANT_ROCK).unwrap().pool,
+            CardPoolId::Token
+        );
     }
 
     #[test]

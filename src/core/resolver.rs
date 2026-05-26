@@ -1604,8 +1604,8 @@ fn validate_card_target(
                 _ => Err(PreventReason::NoValidTarget),
             }
         }
-        TargetType::AllEnemies | TargetType::RandomEnemy => Ok(()),
-        TargetType::SelfTarget => {
+        TargetType::AllEnemies | TargetType::RandomEnemy | TargetType::AllAllies => Ok(()),
+        TargetType::SelfTarget | TargetType::AnyPlayer => {
             if target.is_none() || target == state.player_creature_id() {
                 Ok(())
             } else {
@@ -1631,6 +1631,13 @@ fn validate_card_target(
             match state.creature(target) {
                 Some(creature) if creature.is_hittable() => Ok(()),
                 _ => Err(PreventReason::NoValidTarget),
+            }
+        }
+        TargetType::TargetedNoCreature | TargetType::Osty => {
+            if target.is_none() {
+                Ok(())
+            } else {
+                Err(PreventReason::NoValidTarget)
             }
         }
     }
@@ -1727,7 +1734,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use crate::content::cards::{
-        CardDef, CardPlayCtx, CardRarity, CardRules, CardType, TargetType,
+        CardDef, CardPlayCtx, CardPoolId, CardRarity, CardRules, CardType, TargetType,
     };
     use crate::content::powers::{PowerDef, PowerRules};
     use crate::core::effect::{
@@ -1778,6 +1785,7 @@ mod tests {
         CardDef {
             id: STARTER_STRIKE,
             loc_key: LocKey::new("card.starter_strike"),
+            pool: CardPoolId::Ironclad,
             card_type: CardType::Attack,
             rarity: CardRarity::Basic,
             target: TargetType::Enemy,

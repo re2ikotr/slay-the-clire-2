@@ -113,7 +113,9 @@ impl EnemyTargetPreview {
             TargetType::None
             | TargetType::RandomEnemy
             | TargetType::SelfTarget
+            | TargetType::AnyPlayer
             | TargetType::AnyAlly => Self::None,
+            TargetType::AllAllies | TargetType::TargetedNoCreature | TargetType::Osty => Self::None,
         }
     }
 
