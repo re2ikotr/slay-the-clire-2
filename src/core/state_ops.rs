@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, PlayerId, PowerId, PowerInstanceId};
 use crate::core::state::{
     decimal_to_i32_trunc, CardCosts, CardCounter, CardFlags, CardInstance, GameState, PileId,
-    PileKind, PowerInstance, ResourceKind, StateError, TemporaryCardCosts, MAX_CARDS_IN_HAND,
+    PileKind, PowerInstance, ResourceKind, Side, StateError, TemporaryCardCosts, MAX_CARDS_IN_HAND,
 };
 
 impl GameState {
@@ -62,9 +62,7 @@ impl GameState {
                 combat
                     .creatures
                     .iter()
-                    .filter(|creature| {
-                        creature.side == crate::core::state::Side::Monsters && creature.alive
-                    })
+                    .filter(|creature| creature.side == Side::Monsters && creature.is_hittable())
                     .map(|creature| creature.id)
                     .collect()
             })

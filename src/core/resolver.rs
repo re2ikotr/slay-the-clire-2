@@ -724,10 +724,18 @@ impl EffectResolver {
         registry: &StaticRegistry,
         op: DamageOp,
     ) -> ApplyResult {
+        let target = op.target;
+        let Some(creature) = state.creature(target) else {
+            return ApplyResult::StateError(StateError::UnknownCreature(target));
+        };
+        if !creature.is_hittable() {
+            return ApplyResult::Continue(Vec::new());
+        }
+
         let calc = DamageCalc {
             source: op.source,
             dealer: op.dealer,
-            target: op.target,
+            target,
             kind: op.kind,
             base_amount: op.base_amount,
             amount: op.base_amount,
@@ -735,11 +743,6 @@ impl EffectResolver {
         let (calc, modifiers) = RulePipeline::modify_damage(registry, state, calc);
         self.log
             .extend(modifiers.into_iter().map(LogEntry::ModifierApplied));
-
-        let target = op.target;
-        let Some(creature) = state.creature(target) else {
-            return ApplyResult::StateError(StateError::UnknownCreature(target));
-        };
 
         let requested = if calc.amount < Decimal::from(0) {
             Decimal::from(0)
@@ -1441,7 +1444,9 @@ fn validate_card_target(
                 return Err(PreventReason::NoValidTarget);
             };
             match state.creature(target) {
-                Some(creature) if creature.side == Side::Monsters && creature.alive => Ok(()),
+                Some(creature) if creature.side == Side::Monsters && creature.is_hittable() => {
+                    Ok(())
+                }
                 _ => Err(PreventReason::NoValidTarget),
             }
         }
@@ -1461,7 +1466,7 @@ fn validate_card_target(
                 return Err(PreventReason::NoValidTarget);
             };
             match state.creature(target) {
-                Some(creature) if creature.side == Side::Player && creature.alive => Ok(()),
+                Some(creature) if creature.side == Side::Player && creature.is_hittable() => Ok(()),
                 _ => Err(PreventReason::NoValidTarget),
             }
         }
@@ -1470,7 +1475,7 @@ fn validate_card_target(
                 return Err(PreventReason::NoValidTarget);
             };
             match state.creature(target) {
-                Some(creature) if creature.alive => Ok(()),
+                Some(creature) if creature.is_hittable() => Ok(()),
                 _ => Err(PreventReason::NoValidTarget),
             }
         }
@@ -1571,9 +1576,12 @@ mod tests {
         CardDef, CardPlayCtx, CardRarity, CardRules, CardType, TargetType,
     };
     use crate::content::powers::{PowerDef, PowerRules};
-    use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
+    use crate::core::effect::{
+        DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect, Source,
+    };
     use crate::core::engine::{CombatOutcome, Engine, StepResult};
     use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey, PowerId, PowerInstanceId};
+    use crate::core::log::{LogEntry, StateChange};
     use crate::core::query::{
         DamageCalc, Decision, DecisionQuery, DecisionQueryKind, PreventReason,
     };
@@ -1739,6 +1747,71 @@ mod tests {
             }
             other => panic!("expected combat over, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn all_enemy_damage_skips_targets_killed_by_an_earlier_hit() {
+        let mut state = GameState::single_player_test_combat(
+            9,
+            Vec::<CombatSetupCard>::new(),
+            [
+                CombatSetupMonster {
+                    model: None,
+                    max_hp: 3,
+                },
+                CombatSetupMonster {
+                    model: None,
+                    max_hp: 10,
+                },
+            ],
+            50,
+            3,
+            0,
+        );
+        let monsters = state.combat().unwrap().monster_ids();
+        let fragile = monsters[0];
+        let sturdy = monsters[1];
+        let mut resolver = EffectResolver::default();
+
+        resolver.enqueue(Effect::DealDamageToAllEnemies(DamageAllEnemiesOp {
+            source: None,
+            dealer: state.player_creature_id(),
+            base_amount: Decimal::from(3),
+            kind: DamageKind::Attack,
+            flags: DamageFlags {
+                ignores_block: false,
+            },
+            hit_count: 2,
+        }));
+
+        let StepResult::Done(log) = resolver.drain(&mut state, &StaticRegistry::empty()) else {
+            panic!("expected all-enemy damage to finish");
+        };
+
+        let damage_results = log
+            .iter()
+            .filter_map(|entry| match entry {
+                LogEntry::StateChanged(StateChange::DamageApplied(result)) => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            damage_results
+                .iter()
+                .filter(|result| result.target == fragile)
+                .count(),
+            1
+        );
+        assert_eq!(
+            damage_results
+                .iter()
+                .filter(|result| result.target == sturdy)
+                .count(),
+            2
+        );
+        assert!(!state.creature(fragile).unwrap().alive);
+        assert_eq!(state.creature(sturdy).unwrap().hp, 4);
     }
 
     #[test]
