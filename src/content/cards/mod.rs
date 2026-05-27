@@ -191,6 +191,7 @@ pub mod silent;
 pub mod statuses;
 pub mod tokens;
 
+pub use crate::content::generated_cards::*;
 pub use ironclad::*;
 
 pub fn register_all_cards(registry: &mut DefRegistry<CardId, CardDef>) {

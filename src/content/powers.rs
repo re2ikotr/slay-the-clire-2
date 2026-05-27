@@ -6,11 +6,11 @@ use crate::core::event::Event;
 use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
 use crate::core::query::{
     BlockCalc, CardPlayResultPileCalc, DamageCalc, Decision, DecisionQuery, DecisionQueryKind,
-    HpLossCalc, OrbPassiveTriggerCountCalc, OrbValueCalc, PowerAmountCalc, PreventReason,
-    ResourceCostCalc, SummonAmountCalc, UnblockedDamageTargetCalc,
+    HpLossCalc, HpLossPhase, OrbPassiveTriggerCountCalc, OrbValueCalc, PowerAmountCalc,
+    PreventReason, ResourceCostCalc, SummonAmountCalc, UnblockedDamageTargetCalc,
 };
 use crate::core::rules::{prevent_by_current_listener, RuleCtx};
-use crate::core::state::{PileId, PileKind, ResourceKind, Side};
+use crate::core::state::{PileId, PileKind, PlayerPetKind, ResourceKind, Side};
 use crate::registry::DefRegistry;
 
 pub type PowerEventFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, &Event) -> Vec<Effect>;
@@ -107,6 +107,19 @@ power_ids! {
     POISON_POWER => "POISON_POWER",
     DOOM_POWER => "DOOM_POWER",
     CALAMITY_POWER => "CALAMITY_POWER",
+    DEXTERITY_POWER => "DEXTERITY_POWER",
+    THORNS_POWER => "THORNS_POWER",
+    FOCUS_POWER => "FOCUS_POWER",
+    ACCURACY_POWER => "ACCURACY_POWER",
+    AFTERIMAGE_POWER => "AFTERIMAGE_POWER",
+    ACCELERANT_POWER => "ACCELERANT_POWER",
+    NOXIOUS_FUMES_POWER => "NOXIOUS_FUMES_POWER",
+    FRAIL_POWER => "FRAIL_POWER",
+    INTANGIBLE_POWER => "INTANGIBLE_POWER",
+    BUFFER_POWER => "BUFFER_POWER",
+    DIE_FOR_YOU_POWER => "DIE_FOR_YOU_POWER",
+    ENERGY_NEXT_TURN_POWER => "ENERGY_NEXT_TURN_POWER",
+    DRAW_NEXT_TURN_POWER => "DRAW_NEXT_TURN_POWER",
 }
 
 pub fn register_core_powers(registry: &mut DefRegistry<PowerId, PowerDef>) {
@@ -146,6 +159,19 @@ pub fn register_core_powers(registry: &mut DefRegistry<PowerId, PowerDef>) {
         simple_event_power(POISON_POWER, poison_on_event),
         simple_event_power(DOOM_POWER, doom_on_event),
         simple_event_power(CALAMITY_POWER, calamity_on_event),
+        dexterity(),
+        simple_event_power(THORNS_POWER, thorns_on_event),
+        focus(),
+        accuracy(),
+        simple_event_power(AFTERIMAGE_POWER, afterimage_on_event),
+        simple_event_power(ACCELERANT_POWER, no_power_event),
+        simple_event_power(NOXIOUS_FUMES_POWER, noxious_fumes_on_event),
+        frail(),
+        intangible(),
+        buffer(),
+        die_for_you(),
+        simple_event_power(ENERGY_NEXT_TURN_POWER, energy_next_turn_on_event),
+        simple_event_power(DRAW_NEXT_TURN_POWER, draw_next_turn_on_event),
     ] {
         registry.register(def);
     }
@@ -168,6 +194,7 @@ fn vulnerable() -> PowerDef {
         loc_key: LocKey::new("power.vulnerable"),
         rules: PowerRules {
             modify_damage_multiplicative: Some(vulnerable_modify_damage),
+            on_event: Some(remove_one_on_owner_turn_end),
             ..PowerRules::default()
         },
     }
@@ -179,6 +206,7 @@ fn weak() -> PowerDef {
         loc_key: LocKey::new("power.weak"),
         rules: PowerRules {
             modify_damage_multiplicative: Some(weak_modify_damage),
+            on_event: Some(remove_one_on_owner_turn_end),
             ..PowerRules::default()
         },
     }
@@ -260,6 +288,86 @@ fn no_draw() -> PowerDef {
 
 fn no_energy_gain() -> PowerDef {
     simple_event_power(NO_ENERGY_GAIN_POWER, remove_on_player_turn_end)
+}
+
+fn dexterity() -> PowerDef {
+    PowerDef {
+        id: DEXTERITY_POWER,
+        loc_key: LocKey::new("power.dexterity"),
+        rules: PowerRules {
+            modify_block_additive: Some(dexterity_modify_block_additive),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn focus() -> PowerDef {
+    PowerDef {
+        id: FOCUS_POWER,
+        loc_key: LocKey::new("power.focus"),
+        rules: PowerRules {
+            modify_orb_value: Some(focus_modify_orb_value),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn accuracy() -> PowerDef {
+    PowerDef {
+        id: ACCURACY_POWER,
+        loc_key: LocKey::new("power.accuracy"),
+        rules: PowerRules {
+            modify_damage_additive: Some(accuracy_modify_damage_additive),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn frail() -> PowerDef {
+    PowerDef {
+        id: FRAIL_POWER,
+        loc_key: LocKey::new("power.frail"),
+        rules: PowerRules {
+            on_event: Some(remove_one_on_owner_turn_end),
+            modify_block_multiplicative: Some(frail_modify_block),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn intangible() -> PowerDef {
+    PowerDef {
+        id: INTANGIBLE_POWER,
+        loc_key: LocKey::new("power.intangible"),
+        rules: PowerRules {
+            on_event: Some(remove_one_on_owner_turn_end),
+            modify_damage_cap: Some(intangible_modify_damage_cap),
+            modify_hp_loss: Some(intangible_modify_hp_loss),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn buffer() -> PowerDef {
+    PowerDef {
+        id: BUFFER_POWER,
+        loc_key: LocKey::new("power.buffer"),
+        rules: PowerRules {
+            modify_hp_loss: Some(buffer_modify_hp_loss),
+            ..PowerRules::default()
+        },
+    }
+}
+
+fn die_for_you() -> PowerDef {
+    PowerDef {
+        id: DIE_FOR_YOU_POWER,
+        loc_key: LocKey::new("power.die_for_you"),
+        rules: PowerRules {
+            modify_unblocked_damage_target: Some(die_for_you_redirect),
+            ..PowerRules::default()
+        },
+    }
 }
 
 fn tank() -> PowerDef {
@@ -425,6 +533,163 @@ fn unmovable_modify_block(
     calc
 }
 
+fn dexterity_modify_block_additive(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: BlockCalc,
+) -> BlockCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.target == instance.owner {
+        calc.amount += Decimal::from(instance.amount);
+    }
+    if calc.amount < Decimal::from(0) {
+        calc.amount = Decimal::from(0);
+    }
+    calc
+}
+
+fn frail_modify_block(ctx: &RuleCtx<'_>, power: PowerInstanceId, mut calc: BlockCalc) -> BlockCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.target == instance.owner {
+        calc.amount *= Decimal::new(75, 2);
+    }
+    calc
+}
+
+fn focus_modify_orb_value(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: OrbValueCalc,
+) -> OrbValueCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if ctx.state.player_creature_id() == Some(instance.owner) {
+        calc.amount += Decimal::from(instance.amount);
+        if calc.amount < Decimal::from(0) {
+            calc.amount = Decimal::from(0);
+        }
+    }
+    calc
+}
+
+fn accuracy_modify_damage_additive(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: DamageCalc,
+) -> DamageCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.kind != DamageKind::Attack || calc.dealer != Some(instance.owner) {
+        return calc;
+    }
+    let is_shiv = match calc.source {
+        Some(Source::Card(card)) => ctx
+            .state
+            .card(card)
+            .and_then(|card| ctx.registry.cards.get(card.def))
+            .map(|def| def.has_tag(CardTag::Shiv))
+            .unwrap_or(false),
+        _ => false,
+    };
+    if is_shiv {
+        calc.amount += Decimal::from(instance.amount);
+    }
+    calc
+}
+
+fn intangible_modify_damage_cap(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: DamageCalc,
+) -> DamageCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.target == instance.owner && calc.amount > Decimal::from(1) {
+        calc.amount = Decimal::from(1);
+    }
+    calc
+}
+
+fn intangible_modify_hp_loss(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: HpLossCalc,
+) -> HpLossCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.target == instance.owner && calc.amount > Decimal::from(1) {
+        calc.amount = Decimal::from(1);
+    }
+    calc
+}
+
+fn buffer_modify_hp_loss(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: HpLossCalc,
+) -> HpLossCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.target == instance.owner
+        && calc.phase == HpLossPhase::AfterRedirect
+        && calc.amount > Decimal::from(0)
+        && instance.amount > 0
+    {
+        calc.amount = Decimal::from(0);
+    }
+    calc
+}
+
+fn die_for_you_redirect(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    mut calc: UnblockedDamageTargetCalc,
+) -> UnblockedDamageTargetCalc {
+    let Some(instance) = power_instance(ctx, power) else {
+        return calc;
+    };
+    if calc.target != instance.owner || calc.amount <= Decimal::from(0) {
+        return calc;
+    }
+    let Some(owner) = ctx.state.creature(instance.owner) else {
+        return calc;
+    };
+    let Some(osty) = ctx.state.combat().and_then(|combat| {
+        combat
+            .creatures
+            .iter()
+            .find(|creature| {
+                creature.side == Side::Player
+                    && creature.pet_kind == Some(PlayerPetKind::Osty)
+                    && creature.alive
+                    && creature.hp > 0
+                    && creature.pet_owner == Some(combat.player.id)
+            })
+            .map(|creature| creature.id)
+    }) else {
+        return calc;
+    };
+    if owner.side == Side::Player
+        && calc
+            .dealer
+            .and_then(|dealer| ctx.state.creature(dealer))
+            .map(|dealer| dealer.side == Side::Monsters)
+            .unwrap_or(false)
+    {
+        calc.target = osty;
+    }
+    calc
+}
+
 fn corruption_modify_cost(
     ctx: &RuleCtx<'_>,
     _power: PowerInstanceId,
@@ -519,26 +784,54 @@ fn poison_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> 
     if !matches!(event, Event::TurnStarted { side } if *side == owner.side) {
         return Vec::new();
     }
-    let mut effects = vec![Effect::DealDamage(DamageOp {
-        source: Some(Source::Power(power)),
-        dealer: None,
-        target: instance.owner,
-        base_amount: Decimal::from(instance.amount),
-        kind: DamageKind::LifeLoss,
-        flags: DamageFlags {
-            ignores_block: true,
-        },
-    })];
-    if instance.amount <= 1 {
+
+    let trigger_count = poison_trigger_count(ctx, owner.side);
+    let mut effects = Vec::new();
+    let mut amount = instance.amount;
+    for _ in 0..trigger_count {
+        if amount <= 0 {
+            break;
+        }
+        effects.push(Effect::DealDamage(DamageOp {
+            source: Some(Source::Power(power)),
+            dealer: None,
+            target: instance.owner,
+            base_amount: Decimal::from(amount),
+            kind: DamageKind::LifeLoss,
+            flags: DamageFlags {
+                ignores_block: true,
+            },
+        }));
+        amount -= 1;
+    }
+    let delta = amount - instance.amount;
+    if amount <= 0 {
         effects.push(Effect::RemovePower { power });
-    } else {
+    } else if delta != 0 {
         effects.push(Effect::AddPowerAmount {
             power,
-            amount: Decimal::from(-1),
+            amount: Decimal::from(delta),
             source: Some(Source::Power(power)),
         });
     }
+
     effects
+}
+
+fn poison_trigger_count(ctx: &RuleCtx<'_>, poisoned_side: Side) -> i32 {
+    let accelerant = ctx
+        .state
+        .combat()
+        .map(|combat| {
+            combat
+                .creatures
+                .iter()
+                .filter(|creature| creature.alive && creature.side != poisoned_side)
+                .map(|creature| ctx.state.power_amount(creature.id, ACCELERANT_POWER).max(0))
+                .sum::<i32>()
+        })
+        .unwrap_or(0);
+    1 + accelerant
 }
 
 fn doom_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
@@ -588,6 +881,142 @@ fn calamity_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -
             zero_cost_this_turn: false,
         })
         .collect()
+}
+
+fn no_power_event(_ctx: &RuleCtx<'_>, _power: PowerInstanceId, _event: &Event) -> Vec<Effect> {
+    Vec::new()
+}
+
+fn thorns_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Event::DamageDealt(result) = event else {
+        return Vec::new();
+    };
+    if result.target != instance.owner || result.hp_loss <= 0 || result.kind != DamageKind::Attack {
+        return Vec::new();
+    }
+    result
+        .dealer
+        .filter(|dealer| {
+            ctx.state
+                .creature(*dealer)
+                .map(|c| c.alive)
+                .unwrap_or(false)
+        })
+        .map(|dealer| {
+            vec![Effect::DealDamage(DamageOp {
+                source: Some(Source::Power(power)),
+                dealer: Some(instance.owner),
+                target: dealer,
+                base_amount: Decimal::from(instance.amount),
+                kind: DamageKind::Thorns,
+                flags: DamageFlags {
+                    ignores_block: false,
+                },
+            })]
+        })
+        .unwrap_or_default()
+}
+
+fn afterimage_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Event::CardPlayed(event) = event else {
+        return Vec::new();
+    };
+    if ctx.state.player_creature_id() == Some(instance.owner) {
+        vec![Effect::GainBlock {
+            target: instance.owner,
+            amount: Decimal::from(instance.amount),
+            source: Some(Source::Power(power)),
+        }]
+    } else if ctx
+        .state
+        .combat()
+        .map(|combat| combat.player.id == event.player)
+        .unwrap_or(false)
+    {
+        vec![Effect::GainBlock {
+            target: instance.owner,
+            amount: Decimal::from(instance.amount),
+            source: Some(Source::Power(power)),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+fn noxious_fumes_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnStarted { side: Side::Player }) {
+        return Vec::new();
+    }
+    ctx.state
+        .alive_monster_ids()
+        .into_iter()
+        .map(|target| Effect::ApplyPower {
+            target,
+            power: POISON_POWER,
+            amount: Decimal::from(instance.amount),
+            source: Some(Source::Power(power)),
+        })
+        .collect()
+}
+
+fn energy_next_turn_on_event(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    event: &Event,
+) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnStarted { side: Side::Player }) {
+        return Vec::new();
+    }
+    ctx.state
+        .player_id()
+        .map(|player| {
+            vec![
+                Effect::GainResource {
+                    player,
+                    resource: ResourceKind::Energy,
+                    amount: instance.amount,
+                },
+                Effect::RemovePower { power },
+            ]
+        })
+        .unwrap_or_default()
+}
+
+fn draw_next_turn_on_event(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    event: &Event,
+) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnStarted { side: Side::Player }) {
+        return Vec::new();
+    }
+    ctx.state
+        .player_id()
+        .map(|player| {
+            vec![
+                Effect::DrawCards {
+                    player,
+                    count: instance.amount.max(0) as u8,
+                },
+                Effect::RemovePower { power },
+            ]
+        })
+        .unwrap_or_default()
 }
 
 fn aggression_on_event(ctx: &RuleCtx<'_>, _power: PowerInstanceId, event: &Event) -> Vec<Effect> {
@@ -1081,6 +1510,31 @@ fn remove_on_player_turn_end(
         vec![Effect::RemovePower { power }]
     } else {
         Vec::new()
+    }
+}
+
+fn remove_one_on_owner_turn_end(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    event: &Event,
+) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Some(owner) = ctx.state.creature(instance.owner) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnEnded { side } if *side == owner.side) {
+        return Vec::new();
+    }
+    if instance.amount <= 1 {
+        vec![Effect::RemovePower { power }]
+    } else {
+        vec![Effect::AddPowerAmount {
+            power,
+            amount: Decimal::from(-1),
+            source: Some(Source::Power(power)),
+        }]
     }
 }
 

@@ -559,7 +559,11 @@ impl EffectResolver {
                     .filter(|combat| combat.player.id == player)
                     .map(|combat| combat.player.piles.hand.clone())
                     .unwrap_or_default();
-                self.discard_cards(state, registry, player, cards, kind, 0)
+                if kind == DiscardKind::EndOfTurn {
+                    self.cleanup_hand_at_end_turn(state, registry, player, cards)
+                } else {
+                    self.discard_cards(state, registry, player, cards, kind, 0)
+                }
             }
             Effect::DiscardCards {
                 player,
@@ -931,7 +935,7 @@ impl EffectResolver {
         // C# CardSelectCmd.FromHand auto-selects all valid cards when the
         // requested count is exact and the available count is not greater.
         if min == max && cards.len() <= min {
-            let effects = choice_action_effects(on_resolve, cards);
+            let effects = choice_action_effects(state, on_resolve, cards);
             return self.apply_immediate_effects(state, registry, effects);
         }
 
@@ -978,7 +982,57 @@ impl EffectResolver {
                 ChoiceValue::Target(_) | ChoiceValue::None => None,
             })
             .collect::<Vec<_>>();
-        let effects = choice_action_effects(resolution.request.on_resolve, selected_cards);
+        let effects = choice_action_effects(state, resolution.request.on_resolve, selected_cards);
+        self.apply_immediate_effects(state, registry, effects)
+    }
+
+    fn cleanup_hand_at_end_turn(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        cards: Vec<CardInstanceId>,
+    ) -> ApplyResult {
+        let mut effects = Vec::new();
+        let mut discard = Vec::new();
+
+        for card in cards {
+            if !state.card_is_in_pile(card, PileKind::Hand) {
+                continue;
+            }
+            if card_has_keyword(state, registry, card, CardKeyword::Retain) {
+                continue;
+            }
+            if card_has_keyword(state, registry, card, CardKeyword::Ethereal) {
+                effects.push(Effect::ExhaustCard { card });
+            } else {
+                discard.push(card);
+            }
+        }
+
+        for card in discard {
+            match state.move_card(card, PileId::player(player, PileKind::Discard)) {
+                Ok(from_kind) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::CardMoved {
+                            card,
+                            from: from_kind.map(|kind| PileId {
+                                owner: player,
+                                kind,
+                            }),
+                            to: PileId::player(player, PileKind::Discard),
+                            reason: MoveReason::Discard,
+                        }));
+                    effects.push(Effect::Trigger(Event::CardDiscarded(CardDiscarded {
+                        player,
+                        card,
+                        kind: DiscardKind::EndOfTurn,
+                    })));
+                }
+                Err(error) => return ApplyResult::StateError(error),
+            }
+        }
+
         self.apply_immediate_effects(state, registry, effects)
     }
 
@@ -1108,7 +1162,7 @@ impl EffectResolver {
         let effects = registry
             .orbs
             .get(instance.def)
-            .map(|def| (def.evoke)(&ctx, orb, None))
+            .map(|def| (def.evoke)(&ctx, orb, OrbTrigger::BeforeTurnEnd, None))
             .unwrap_or_default();
         match self.apply_immediate_effects(state, registry, effects) {
             ApplyResult::Continue(_) => {}
@@ -1171,7 +1225,7 @@ impl EffectResolver {
             let effects = registry
                 .orbs
                 .get(instance.def)
-                .map(|def| (def.passive)(&ctx, orb, target))
+                .map(|def| (def.passive)(&ctx, orb, trigger, target))
                 .unwrap_or_default();
             match self.apply_immediate_effects(state, registry, effects) {
                 ApplyResult::Continue(_) => {}
@@ -1240,12 +1294,21 @@ impl EffectResolver {
             id
         };
 
-        ApplyResult::Continue(vec![Effect::Trigger(Event::Summoned(Summoned {
+        let mut effects = vec![Effect::Trigger(Event::Summoned(Summoned {
             player,
             creature: creature_id,
             amount,
             source,
-        }))])
+        }))];
+        if let Some(owner) = state.player_creature_id() {
+            effects.push(Effect::ApplyPower {
+                target: owner,
+                power: crate::content::powers::DIE_FOR_YOU_POWER,
+                amount: Decimal::from(1),
+                source,
+            });
+        }
+        ApplyResult::Continue(effects)
     }
 
     fn apply_damage(
@@ -1600,6 +1663,7 @@ impl EffectResolver {
         event: &Event,
     ) {
         if let Event::CardPlayStarted(event) = event {
+            state.record_card_played();
             let is_attack = state
                 .card(event.card)
                 .and_then(|card| registry.cards.get(card.def))
@@ -1985,14 +2049,98 @@ fn card_loc_key(
         .unwrap_or_else(|| LocKey::new("card.UNKNOWN"))
 }
 
-fn choice_action_effects(action: ChoiceAction, cards: Vec<CardInstanceId>) -> Vec<Effect> {
+fn choice_action_effects(
+    state: &GameState,
+    action: ChoiceAction,
+    cards: Vec<CardInstanceId>,
+) -> Vec<Effect> {
     match action {
         ChoiceAction::None => Vec::new(),
         ChoiceAction::ExhaustSelectedCards => cards
             .into_iter()
             .map(|card| Effect::ExhaustCard { card })
             .collect(),
+        ChoiceAction::DiscardSelectedCards => selected_discard_effect(state, cards, 0),
+        ChoiceAction::DiscardSelectedCardsThenDraw(count) => {
+            selected_discard_effect(state, cards, count)
+        }
+        ChoiceAction::DiscardSelectedCardsThenAddCard {
+            def,
+            count,
+            upgraded,
+        } => selected_discard_then_add_card_effects(state, cards, def, count, upgraded),
     }
+}
+
+fn selected_discard_effect(
+    state: &GameState,
+    cards: Vec<CardInstanceId>,
+    then_draw: u8,
+) -> Vec<Effect> {
+    if cards.is_empty() {
+        return Vec::new();
+    }
+    let Some(player) = cards
+        .first()
+        .and_then(|card| state.card(*card))
+        .map(|card| card.owner)
+        .or_else(|| state.player_id())
+    else {
+        return Vec::new();
+    };
+    vec![Effect::DiscardCards {
+        player,
+        cards,
+        kind: DiscardKind::Manual,
+        then_draw,
+    }]
+}
+
+fn selected_discard_then_add_card_effects(
+    state: &GameState,
+    cards: Vec<CardInstanceId>,
+    def: crate::core::ids::CardId,
+    count: u8,
+    upgraded: bool,
+) -> Vec<Effect> {
+    let Some(player) = cards
+        .first()
+        .and_then(|card| state.card(*card))
+        .map(|card| card.owner)
+        .or_else(|| state.player_id())
+    else {
+        return Vec::new();
+    };
+    let mut effects = selected_discard_effect(state, cards, 0);
+    for _ in 0..count {
+        effects.push(Effect::AddGeneratedCard {
+            player,
+            def,
+            to: PileId::player(player, PileKind::Hand),
+            upgraded,
+            temporary: true,
+            zero_cost_this_turn: false,
+        });
+    }
+    effects
+}
+
+fn card_has_keyword(
+    state: &GameState,
+    registry: &StaticRegistry,
+    card: CardInstanceId,
+    keyword: CardKeyword,
+) -> bool {
+    state
+        .card(card)
+        .and_then(|card_state| {
+            registry
+                .cards
+                .get(card_state.def)
+                .map(|def| (card_state, def))
+        })
+        .map(|(card_state, def)| def.has_keyword(card_state.upgraded, keyword))
+        .unwrap_or(false)
 }
 
 fn resolve_card_play_result_pile(
@@ -2429,6 +2577,7 @@ mod tests {
     fn test_orb_passive(
         ctx: &RuleCtx<'_>,
         orb: OrbInstanceId,
+        _: OrbTrigger,
         _: Option<CreatureId>,
     ) -> Vec<Effect> {
         let Some(player) = ctx.state.orb(orb).map(|orb| orb.owner) else {

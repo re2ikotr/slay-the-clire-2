@@ -611,6 +611,12 @@ impl GameState {
         }
     }
 
+    pub fn record_card_played(&mut self) {
+        if let Some(combat) = self.combat.as_mut() {
+            combat.turn_stats.cards_played += 1;
+        }
+    }
+
     pub fn record_card_exhausted(&mut self) {
         if let Some(combat) = self.combat.as_mut() {
             combat.turn_stats.cards_exhausted += 1;

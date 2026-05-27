@@ -403,6 +403,7 @@ impl CombatState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CombatTurnStats {
     pub attacks_played: u32,
+    pub cards_played: u32,
     pub cards_exhausted: u32,
     pub hp_lost_by_player: i32,
     pub card_block_gains: u32,

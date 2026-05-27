@@ -1,5 +1,6 @@
 use crate::content::card_text::CardTextLine;
 use crate::content::cards::{CardKeyword, CardType, TargetType};
+use crate::content::generated_cards;
 use crate::content::monsters::MonsterIntent;
 use crate::core::ids::LocKey;
 use crate::core::state::{CardCost, CombatPhase};
@@ -60,6 +61,7 @@ impl Localization {
 
     pub fn entity_name(self, loc_key: LocKey) -> String {
         lookup(ENTITY_NAMES, loc_key.as_str(), self.language)
+            .or_else(|| generated_cards::localized_card_name(loc_key, self.language))
             .map(str::to_string)
             .unwrap_or_else(|| fallback_label(loc_key.as_str()))
     }

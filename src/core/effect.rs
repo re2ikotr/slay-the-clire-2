@@ -362,6 +362,13 @@ pub enum ChoiceValue {
 pub enum ChoiceAction {
     None,
     ExhaustSelectedCards,
+    DiscardSelectedCards,
+    DiscardSelectedCardsThenDraw(u8),
+    DiscardSelectedCardsThenAddCard {
+        def: CardId,
+        count: u8,
+        upgraded: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

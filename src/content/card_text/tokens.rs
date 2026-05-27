@@ -14,6 +14,6 @@ pub(super) fn describe_lines(ctx: &CardTextCtx<'_>, card: CardInstanceId) -> Vec
                 zhs: format!("造成{amount}点伤害。"),
             }]
         }
-        _ => Vec::new(),
+        _ => crate::content::generated_cards::describe_lines(ctx, card),
     }
 }

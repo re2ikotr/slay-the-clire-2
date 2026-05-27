@@ -1,6 +1,7 @@
 pub mod card_text;
 pub mod cards;
 pub mod encounters;
+pub mod generated_cards;
 pub mod monsters;
 pub mod orbs;
 pub mod potions;
