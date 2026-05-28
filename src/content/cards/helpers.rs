@@ -15,6 +15,7 @@ use crate::core::effect::{
     Source,
 };
 use crate::core::ids::{CardInstanceId, CreatureId, PowerId};
+use crate::core::state::ResourceKind;
 
 /// Strike-pattern helper: target-required attack with a base damage and an
 /// optional upgrade delta, applied `hits` times.
@@ -139,6 +140,43 @@ pub(crate) fn lose_self_hp(
             }]
         })
         .unwrap_or_default()
+}
+
+/// Player draws `count` cards.
+pub(crate) fn draw_cards(ctx: &CardPlayCtx<'_>, card: CardInstanceId, count: u8) -> Vec<Effect> {
+    ctx.state
+        .card(card)
+        .map(|card_state| {
+            vec![Effect::DrawCards {
+                player: card_state.owner,
+                count,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// Player gains `amount` of the given resource (Energy or Stars).
+pub(crate) fn gain_resource(
+    ctx: &CardPlayCtx<'_>,
+    card: CardInstanceId,
+    resource: ResourceKind,
+    amount: i32,
+) -> Vec<Effect> {
+    ctx.state
+        .card(card)
+        .map(|card_state| {
+            vec![Effect::GainResource {
+                player: card_state.owner,
+                resource,
+                amount,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// Player gains `amount` energy.
+pub(crate) fn gain_energy(ctx: &CardPlayCtx<'_>, card: CardInstanceId, amount: i32) -> Vec<Effect> {
+    gain_resource(ctx, card, ResourceKind::Energy, amount)
 }
 
 /// Apply a power to the player creature.

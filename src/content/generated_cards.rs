@@ -16,8 +16,7 @@ use crate::core::effect::{
 };
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey, PlayerId, PowerId};
-use crate::core::query::{Decision, DecisionQuery, DecisionQueryKind, PreventReason};
-use crate::core::rules::{prevent_by_current_listener, RuleCtx};
+use crate::core::rules::RuleCtx;
 use crate::core::state::{CardCost, CardCosts, PileId, PileKind, PlayerPetKind, ResourceKind};
 use crate::registry::DefRegistry;
 
@@ -516,36 +515,20 @@ card_ids! {
 const KW_ETERNAL: &[CardKeyword] = &[CardKeyword::Eternal];
 const KW_ETHEREAL: &[CardKeyword] = &[CardKeyword::Ethereal];
 const KW_ETHEREAL_UNPLAYABLE: &[CardKeyword] = &[CardKeyword::Ethereal, CardKeyword::Unplayable];
-const KW_ETHEREAL_UNPLAYABLE_ETERNAL: &[CardKeyword] = &[
-    CardKeyword::Ethereal,
-    CardKeyword::Unplayable,
-    CardKeyword::Eternal,
-];
 const KW_EXHAUST: &[CardKeyword] = &[CardKeyword::Exhaust];
 const KW_EXHAUST_ETHEREAL: &[CardKeyword] = &[CardKeyword::Exhaust, CardKeyword::Ethereal];
 const KW_EXHAUST_INNATE: &[CardKeyword] = &[CardKeyword::Exhaust, CardKeyword::Innate];
 const KW_EXHAUST_RETAIN: &[CardKeyword] = &[CardKeyword::Exhaust, CardKeyword::Retain];
 const KW_INNATE: &[CardKeyword] = &[CardKeyword::Innate];
-const KW_INNATE_ETHEREAL_UNPLAYABLE_ETERNAL: &[CardKeyword] = &[
-    CardKeyword::Innate,
-    CardKeyword::Ethereal,
-    CardKeyword::Unplayable,
-    CardKeyword::Eternal,
-];
-const KW_INNATE_UNPLAYABLE: &[CardKeyword] = &[CardKeyword::Innate, CardKeyword::Unplayable];
 const KW_NONE: &[CardKeyword] = &[];
 const KW_RETAIN: &[CardKeyword] = &[CardKeyword::Retain];
-const KW_RETAIN_UNPLAYABLE: &[CardKeyword] = &[CardKeyword::Retain, CardKeyword::Unplayable];
 const KW_SLY: &[CardKeyword] = &[CardKeyword::Sly];
 const KW_UNPLAYABLE: &[CardKeyword] = &[CardKeyword::Unplayable];
-const KW_UNPLAYABLE_ETERNAL: &[CardKeyword] = &[CardKeyword::Unplayable, CardKeyword::Eternal];
 const TAG_DEFEND: &[CardTag] = &[CardTag::Defend];
-const TAG_MINION: &[CardTag] = &[CardTag::Minion];
 const TAG_NONE: &[CardTag] = &[];
 const TAG_OSTYATTACK: &[CardTag] = &[CardTag::OstyAttack];
 const TAG_SHIV: &[CardTag] = &[CardTag::Shiv];
 const TAG_STRIKE: &[CardTag] = &[CardTag::Strike];
-const TAG_STRIKE_MINION: &[CardTag] = &[CardTag::Strike, CardTag::Minion];
 const POWER_NONE: &[PowerApplySpec] = &[];
 const SPAWN_NONE: &[CardId] = &[];
 
@@ -585,11 +568,6 @@ const POWERS_ROLLING_BOULDER: &[PowerApplySpec] = &[PowerApplySpec {
     power: PowerId::new("POWER_ROLLING_BOULDER"),
     base_amount: 5,
     upgraded_amount: 10,
-}];
-const POWERS_DOUBT: &[PowerApplySpec] = &[PowerApplySpec {
-    power: WEAK,
-    base_amount: 1,
-    upgraded_amount: 1,
 }];
 const POWERS_BEAM_CELL: &[PowerApplySpec] = &[PowerApplySpec {
     power: VULNERABLE,
@@ -1118,26 +1096,6 @@ const POWERS_WRAITH_FORM: &[PowerApplySpec] = &[
         upgraded_amount: 1,
     },
 ];
-const POWERS_DISINTEGRATION: &[PowerApplySpec] = &[PowerApplySpec {
-    power: PowerId::new("POWER_DISINTEGRATION"),
-    base_amount: 6,
-    upgraded_amount: 6,
-}];
-const POWERS_MIND_ROT: &[PowerApplySpec] = &[PowerApplySpec {
-    power: PowerId::new("POWER_MIND_ROT"),
-    base_amount: 1,
-    upgraded_amount: 1,
-}];
-const POWERS_SLOTH: &[PowerApplySpec] = &[PowerApplySpec {
-    power: PowerId::new("POWER_SLOTH"),
-    base_amount: 3,
-    upgraded_amount: 3,
-}];
-const POWERS_WASTE_AWAY: &[PowerApplySpec] = &[PowerApplySpec {
-    power: PowerId::new("POWER_WASTE_AWAY"),
-    base_amount: 1,
-    upgraded_amount: 1,
-}];
 
 #[derive(Clone, Copy)]
 struct PowerApplySpec {
@@ -1200,7 +1158,6 @@ impl CatalogCardSpec {
             play: catalog_play,
             rules: CardRules {
                 on_event: Some(catalog_card_on_event),
-                decide: Some(catalog_card_decide),
                 ..CardRules::default()
             },
         }
@@ -1973,222 +1930,6 @@ const CATALOG_CARD_SPECS: &[CatalogCardSpec] = &[
         base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
         keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
         damage: None, block: Some((50, 75)), draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: ASCENDERS_BANE, loc_key: LocKey::new("card.ASCENDERS_BANE"),
-        name_eng: "Ascender's Bane", name_zhs: "进阶之灾",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_ETHEREAL_UNPLAYABLE_ETERNAL, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: BAD_LUCK, loc_key: LocKey::new("card.BAD_LUCK"),
-        name_eng: "Bad Luck", name_zhs: "霉运",
-        description_eng: "At the end of your turn, if this is in your Hand, lose 13 HP.", description_zhs: "在你的回合结束时，如果这张牌在你的手牌中，则失去13点生命。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE_ETERNAL, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: Some((13, 13)),
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: CLUMSY, loc_key: LocKey::new("card.CLUMSY"),
-        name_eng: "Clumsy", name_zhs: "笨拙",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_ETHEREAL_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: CURSE_OF_THE_BELL, loc_key: LocKey::new("card.CURSE_OF_THE_BELL"),
-        name_eng: "Curse of the Bell", name_zhs: "铃铛的诅咒",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE_ETERNAL, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: DEBT, loc_key: LocKey::new("card.DEBT"),
-        name_eng: "Debt", name_zhs: "债务",
-        description_eng: "At the end of your turn, if this is in your [gold]Hand[/gold], lose 10 [gold]Gold[/gold].", description_zhs: "在你的回合结束时，如果这张牌在你的[gold]手牌[/gold]中，则失去10[gold]金币[/gold]。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: DECAY, loc_key: LocKey::new("card.DECAY"),
-        name_eng: "Decay", name_zhs: "腐朽",
-        description_eng: "At the end of your turn, if this is in your [gold]Hand[/gold], take 2 damage.", description_zhs: "在你的回合结束时，如果这张牌在你的[gold]手牌[/gold]中, 你受到2点伤害。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: Some((2, 2)), block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: DOUBT, loc_key: LocKey::new("card.DOUBT"),
-        name_eng: "Doubt", name_zhs: "疑虑",
-        description_eng: "At the end of your turn, if this is in your [gold]Hand[/gold], gain 1 [gold]Weak[/gold].", description_zhs: "在你的回合结束时，如果这张牌在你的[gold]手牌[/gold]中，获得1层[gold]虚弱[/gold]。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWERS_DOUBT, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: ENTHRALLED, loc_key: LocKey::new("card.ENTHRALLED"),
-        name_eng: "Enthralled", name_zhs: "执迷",
-        description_eng: "If this is in your [gold]Hand[/gold], it must be played before other cards.", description_zhs: "如果这张牌在你的[gold]手牌[/gold]中，你必须优先打出这张牌。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Fixed(2), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_ETERNAL, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: FOLLY, loc_key: LocKey::new("card.FOLLY"),
-        name_eng: "Folly", name_zhs: "愚行",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_INNATE_ETHEREAL_UNPLAYABLE_ETERNAL, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: GREED, loc_key: LocKey::new("card.GREED"),
-        name_eng: "Greed", name_zhs: "贪婪",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE_ETERNAL, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: GUILTY, loc_key: LocKey::new("card.GUILTY"),
-        name_eng: "Guilty", name_zhs: "愧疚",
-        description_eng: "Removed from your [gold]Deck[/gold] after 5 combats.", description_zhs: "在5场战斗后从你的[gold]牌组[/gold]中移除。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: INJURY, loc_key: LocKey::new("card.INJURY"),
-        name_eng: "Injury", name_zhs: "受伤",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: NORMALITY, loc_key: LocKey::new("card.NORMALITY"),
-        name_eng: "Normality", name_zhs: "凡庸",
-        description_eng: "You cannot play more than 3 cards this turn.", description_zhs: "你在本回合不能打出超过3张牌。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: Some((3, 3)), block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: POOR_SLEEP, loc_key: LocKey::new("card.POOR_SLEEP"),
-        name_eng: "Poor Sleep", name_zhs: "睡眠不佳",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_RETAIN_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: REGRET, loc_key: LocKey::new("card.REGRET"),
-        name_eng: "Regret", name_zhs: "悔恨",
-        description_eng: "At the end of your turn, if this is in your [gold]Hand[/gold], lose 1 HP for each card in your [gold]Hand[/gold].", description_zhs: "在你的回合结束时，如果这张牌在你的[gold]手牌[/gold]中，失去相当于[gold]手牌[/gold]数量的生命。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SHAME, loc_key: LocKey::new("card.SHAME"),
-        name_eng: "Shame", name_zhs: "羞耻",
-        description_eng: "At the end of your turn, if this is in your [gold]Hand[/gold], gain 1 [gold]Frail[/gold].", description_zhs: "在你的回合结束时，如果这张牌在你的[gold]手牌[/gold]中，则获得1层[gold]脆弱[/gold]。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SPORE_MIND, loc_key: LocKey::new("card.SPORE_MIND"),
-        name_eng: "Spore Mind", name_zhs: "孢子心灵",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Fixed(1), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: WRITHE, loc_key: LocKey::new("card.WRITHE"),
-        name_eng: "Writhe", name_zhs: "苦恼",
-        description_eng: "", description_zhs: "",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Curse, card_type: CardType::Curse, rarity: CardRarity::Curse, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_INNATE_UNPLAYABLE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
         hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
         powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
     },
@@ -6908,162 +6649,6 @@ const CATALOG_CARD_SPECS: &[CatalogCardSpec] = &[
         hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
         powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
     },
-    CatalogCardSpec {
-        id: FUEL, loc_key: LocKey::new("card.FUEL"),
-        name_eng: "Fuel", name_zhs: "燃料",
-        description_eng: "Gain [energy:1].\nDraw 1 card.", description_zhs: "获得[energy:1]。\n抽1张牌。",
-        upgrade_description_eng: Some("Gain [energy:1].\nDraw 2 cards."), upgrade_description_zhs: Some("获得[energy:1]。\n抽2张牌。"),
-        pool: CardPoolId::Token, card_type: CardType::Skill, rarity: CardRarity::Token, target: TargetType::SelfTarget,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
-        damage: None, block: None, draw: Some((1u8, 2u8)), energy: Some((1, 1)), stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: LUMINESCE, loc_key: LocKey::new("card.LUMINESCE"),
-        name_eng: "Luminesce", name_zhs: "冷光",
-        description_eng: "Gain [energy:2].", description_zhs: "获得[energy:2]。",
-        upgrade_description_eng: Some("Gain [energy:3]."), upgrade_description_zhs: Some("获得[energy:3]。"),
-        pool: CardPoolId::Token, card_type: CardType::Skill, rarity: CardRarity::Token, target: TargetType::SelfTarget,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST_RETAIN, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
-        damage: None, block: None, draw: None, energy: Some((2, 3)), stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: MINION_DIVE_BOMB, loc_key: LocKey::new("card.MINION_DIVE_BOMB"),
-        name_eng: "Minion Dive Bomb", name_zhs: "仆从俯冲",
-        description_eng: "Deal 13 damage.", description_zhs: "造成13点伤害。",
-        upgrade_description_eng: Some("Deal 16 damage."), upgrade_description_zhs: Some("造成16点伤害。"),
-        pool: CardPoolId::Token, card_type: CardType::Attack, rarity: CardRarity::Token, target: TargetType::Enemy,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_MINION, can_generate_in_combat: true,
-        damage: Some((13, 16)), block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: MINION_SACRIFICE, loc_key: LocKey::new("card.MINION_SACRIFICE"),
-        name_eng: "Minion Sacrifice", name_zhs: "仆从捐躯",
-        description_eng: "Gain 9 [gold]Block[/gold].", description_zhs: "获得9点[gold]格挡[/gold]。",
-        upgrade_description_eng: Some("Gain 12 [gold]Block[/gold]."), upgrade_description_zhs: Some("获得12点[gold]格挡[/gold]。"),
-        pool: CardPoolId::Token, card_type: CardType::Skill, rarity: CardRarity::Token, target: TargetType::SelfTarget,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_MINION, can_generate_in_combat: true,
-        damage: None, block: Some((9, 12)), draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: MINION_STRIKE, loc_key: LocKey::new("card.MINION_STRIKE"),
-        name_eng: "Minion Strike", name_zhs: "仆从打击",
-        description_eng: "Deal 6 damage.\nDraw 1 card.", description_zhs: "造成6点伤害。\n抽1张牌。",
-        upgrade_description_eng: Some("Deal 9 damage.\nDraw 1 card."), upgrade_description_zhs: Some("造成9点伤害。\n抽1张牌。"),
-        pool: CardPoolId::Token, card_type: CardType::Attack, rarity: CardRarity::Token, target: TargetType::Enemy,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_STRIKE_MINION, can_generate_in_combat: true,
-        damage: Some((6, 9)), block: None, draw: Some((1u8, 1u8)), energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SHIV, loc_key: LocKey::new("card.SHIV"),
-        name_eng: "Shiv", name_zhs: "小刀",
-        description_eng: "Deal 4 damage to ALL enemies.", description_zhs: "对所有敌人造成4点伤害。",
-        upgrade_description_eng: Some("Deal 6 damage to ALL enemies."), upgrade_description_zhs: Some("对所有敌人造成6点伤害。"),
-        pool: CardPoolId::Token, card_type: CardType::Attack, rarity: CardRarity::Token, target: TargetType::Enemy,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_SHIV, can_generate_in_combat: true,
-        damage: Some((4, 6)), block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SOUL, loc_key: LocKey::new("card.SOUL"),
-        name_eng: "Soul", name_zhs: "灵魂",
-        description_eng: "Draw 2 cards.", description_zhs: "抽2张牌。",
-        upgrade_description_eng: Some("Draw 3 cards."), upgrade_description_zhs: Some("抽3张牌。"),
-        pool: CardPoolId::Token, card_type: CardType::Skill, rarity: CardRarity::Token, target: TargetType::SelfTarget,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
-        damage: None, block: None, draw: Some((2u8, 3u8)), energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SOVEREIGN_BLADE, loc_key: LocKey::new("card.SOVEREIGN_BLADE"),
-        name_eng: "Sovereign Blade", name_zhs: "君王之剑",
-        description_eng: "Deal 10 damage.", description_zhs: "造成10点伤害。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Token, card_type: CardType::Attack, rarity: CardRarity::Token, target: TargetType::Enemy,
-        base_costs: CardCosts { energy: CardCost::Fixed(2), stars: CardCost::None }, upgraded_costs: Some(CardCosts { energy: CardCost::Fixed(1), stars: CardCost::None }),
-        keywords: KW_RETAIN, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
-        damage: Some((10, 10)), block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: Some((1u8, 1u8)), repeat: Some((1u8, 1u8)), summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SWEEPING_GAZE, loc_key: LocKey::new("card.SWEEPING_GAZE"),
-        name_eng: "Sweeping Gaze", name_zhs: "扫荡凝视",
-        description_eng: "[gold]Osty[/gold] deals 10 damage to a random enemy.", description_zhs: "[gold]奥斯提[/gold]对随机一名敌人造成10点伤害。",
-        upgrade_description_eng: Some("[gold]Osty[/gold] deals 15 damage to a random enemy."), upgrade_description_zhs: Some("[gold]奥斯提[/gold]对随机一名敌人造成15点伤害。"),
-        pool: CardPoolId::Token, card_type: CardType::Attack, rarity: CardRarity::Token, target: TargetType::RandomEnemy,
-        base_costs: CardCosts { energy: CardCost::Fixed(0), stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_EXHAUST_ETHEREAL, upgraded_keywords: KW_NONE, tags: TAG_OSTYATTACK, can_generate_in_combat: true,
-        damage: Some((10, 10)), block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: Some((10, 15)), poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: DISINTEGRATION, loc_key: LocKey::new("card.DISINTEGRATION"),
-        name_eng: "Disintegration", name_zhs: "瓦解",
-        description_eng: "At the end of your turn, take 6 damage.", description_zhs: "在你的回合结束时，受到6点伤害。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Token, card_type: CardType::Status, rarity: CardRarity::Status, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWERS_DISINTEGRATION, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: MIND_ROT, loc_key: LocKey::new("card.MIND_ROT"),
-        name_eng: "Mind Rot", name_zhs: "心灵腐化",
-        description_eng: "Draw 1 fewer card each turn.", description_zhs: "每回合少抽1张牌。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Token, card_type: CardType::Status, rarity: CardRarity::Status, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: Some((1u8, 1u8)), energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWERS_MIND_ROT, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: SLOTH, loc_key: LocKey::new("card.SLOTH"),
-        name_eng: "Sloth", name_zhs: "懒惰",
-        description_eng: "You cannot play more than 3 cards each turn.", description_zhs: "你在每个回合不能打出超过3张牌。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Token, card_type: CardType::Status, rarity: CardRarity::Status, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWERS_SLOTH, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
-    CatalogCardSpec {
-        id: WASTE_AWAY, loc_key: LocKey::new("card.WASTE_AWAY"),
-        name_eng: "Waste Away", name_zhs: "衰朽",
-        description_eng: "Gain 1 less [energy:1] per turn.", description_zhs: "每回合失去1点[energy:1]。",
-        upgrade_description_eng: None, upgrade_description_zhs: None,
-        pool: CardPoolId::Token, card_type: CardType::Status, rarity: CardRarity::Status, target: TargetType::None,
-        base_costs: CardCosts { energy: CardCost::Unplayable, stars: CardCost::None }, upgraded_costs: None,
-        keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: false,
-        damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
-        hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWERS_WASTE_AWAY, spawns: SPAWN_NONE, damage_ignores_block: false,
-    },
 ];
 
 pub fn register_pool_cards(registry: &mut DefRegistry<CardId, CardDef>, pool: CardPoolId) {
@@ -7403,18 +6988,6 @@ fn special_play(
         FLASH_OF_STEEL => {
             effects.extend(generic_play(ctx, spec, card, target));
             effects.push(Effect::DrawCards { player, count: 1 });
-            Some(effects)
-        }
-        FUEL => {
-            effects.push(Effect::GainResource {
-                player,
-                resource: ResourceKind::Energy,
-                amount: value_i32(spec.energy, upgraded).unwrap_or(1),
-            });
-            effects.push(Effect::DrawCards {
-                player,
-                count: value_u8(spec.draw, upgraded).unwrap_or(1),
-            });
             Some(effects)
         }
         _ => None,
@@ -7877,12 +7450,7 @@ fn catalog_card_on_event(ctx: &RuleCtx<'_>, card: CardInstanceId, event: &Event)
         Event::TurnEnded {
             side: crate::core::state::Side::Player,
         } if card_state.pile.kind == PileKind::Hand => {
-            let hand_size = ctx
-                .state
-                .combat()
-                .map(|combat| combat.player.piles.hand.len() as i32)
-                .unwrap_or(1);
-            hand_turn_end_effects(spec, card_state.upgraded, player_creature, card, hand_size)
+            hand_turn_end_effects(spec, card_state.upgraded, player_creature, card)
         }
         _ => Vec::new(),
     }
@@ -7893,11 +7461,10 @@ fn hand_turn_end_effects(
     upgraded: bool,
     player_creature: CreatureId,
     card: CardInstanceId,
-    hand_size: i32,
 ) -> Vec<Effect> {
     let source = Some(Source::Card(card));
     match spec.id {
-        BAD_LUCK | BECKON => value_i32(spec.hp_loss, upgraded)
+        BECKON => value_i32(spec.hp_loss, upgraded)
             .map(|amount| {
                 vec![Effect::LoseHp {
                     target: player_creature,
@@ -7906,7 +7473,7 @@ fn hand_turn_end_effects(
                 }]
             })
             .unwrap_or_default(),
-        BURN | DECAY | INFECTION | TOXIC => value_i32(spec.damage, upgraded)
+        BURN | INFECTION | TOXIC => value_i32(spec.damage, upgraded)
             .map(|amount| {
                 vec![Effect::DealDamage(DamageOp {
                     source,
@@ -7920,61 +7487,7 @@ fn hand_turn_end_effects(
                 })]
             })
             .unwrap_or_default(),
-        DOUBT => vec![Effect::ApplyPower {
-            target: player_creature,
-            power: WEAK,
-            amount: Decimal::from(1),
-            source,
-        }],
-        SHAME => vec![Effect::ApplyPower {
-            target: player_creature,
-            power: FRAIL_POWER,
-            amount: Decimal::from(1),
-            source,
-        }],
-        REGRET => vec![Effect::LoseHp {
-            target: player_creature,
-            amount: Decimal::from(hand_size.max(0)),
-            source,
-        }],
         _ => Vec::new(),
-    }
-}
-
-fn catalog_card_decide(
-    ctx: &RuleCtx<'_>,
-    listener_card: CardInstanceId,
-    query: &DecisionQuery,
-) -> Decision {
-    let Some(listener_state) = ctx.state.card(listener_card) else {
-        return Decision::Allow;
-    };
-    if listener_state.pile.kind != PileKind::Hand {
-        return Decision::Allow;
-    }
-    let Some(spec) = spec_by_id(listener_state.def) else {
-        return Decision::Allow;
-    };
-    let DecisionQueryKind::ShouldPlay { card, .. } = query.kind else {
-        return Decision::Allow;
-    };
-    match spec.id {
-        NORMALITY | SLOTH => {
-            let played = ctx
-                .state
-                .combat()
-                .map(|combat| combat.turn_stats.cards_played)
-                .unwrap_or(0);
-            if played >= 3 {
-                prevent_by_current_listener(ctx, PreventReason::CannotPlay)
-            } else {
-                Decision::Allow
-            }
-        }
-        ENTHRALLED if card != listener_card => {
-            prevent_by_current_listener(ctx, PreventReason::Custom("enthralled"))
-        }
-        _ => Decision::Allow,
     }
 }
 
