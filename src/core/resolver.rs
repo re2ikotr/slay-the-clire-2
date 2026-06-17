@@ -15,7 +15,9 @@ use crate::core::event::{
     CreatureHpChanged, Event, OrbChanneled, OrbEvoked, PowerAmountChanged, PowerApplied,
     ResourceChanged, Summoned,
 };
-use crate::core::ids::{CardInstanceId, ChoiceId, CreatureId, LocKey, OrbInstanceId, PlayerId};
+use crate::core::ids::{
+    CardId, CardInstanceId, ChoiceId, CreatureId, LocKey, OrbInstanceId, PlayerId,
+};
 use crate::core::listener::ListenerRef;
 use crate::core::log::{LogEntry, StateChange};
 use crate::core::query::{
@@ -166,11 +168,7 @@ impl EffectResolver {
         effect: Effect,
     ) -> ApplyResult {
         match effect {
-            Effect::Trigger(event) => {
-                self.record_event_stats(state, registry, &event);
-                self.log.push(LogEntry::EventTriggered(event.clone()));
-                ApplyResult::Continue(RulePipeline::notify(registry, state, &event))
-            }
+            Effect::Trigger(event) => self.trigger_event(state, registry, event),
             Effect::ValidateCardPlay {
                 player,
                 card,
@@ -506,6 +504,30 @@ impl EffectResolver {
                     Err(error) => ApplyResult::StateError(error),
                 }
             }
+            Effect::ApplyPowerToRandomEnemy {
+                power,
+                amount,
+                source,
+                count,
+            } => {
+                let mut effects = Vec::new();
+                for _ in 0..count {
+                    let enemies = state.alive_monster_ids();
+                    if enemies.is_empty() {
+                        break;
+                    }
+                    let Some(index) = state.rng.combat_targets.next_usize(enemies.len()) else {
+                        break;
+                    };
+                    effects.push(Effect::ApplyPower {
+                        target: enemies[index],
+                        power,
+                        amount,
+                        source,
+                    });
+                }
+                ApplyResult::Continue(effects)
+            }
             Effect::AddPowerAmount {
                 power,
                 amount,
@@ -622,6 +644,18 @@ impl EffectResolver {
             } => self.select_hand_cards(
                 state, registry, player, filter, min, max, prompt, source, on_resolve,
             ),
+            Effect::SelectPileCards {
+                player,
+                pile,
+                filter,
+                min,
+                max,
+                prompt,
+                source,
+                on_resolve,
+            } => self.select_pile_cards(
+                state, registry, player, pile, filter, min, max, prompt, source, on_resolve,
+            ),
             Effect::UpgradeCard { card } => match state.upgrade_card(card) {
                 Ok(true) => {
                     self.log
@@ -670,6 +704,21 @@ impl EffectResolver {
                         .collect(),
                 )
             }
+            Effect::RetainCardsThisTurn { cards } => {
+                for card in cards {
+                    match state.set_card_retain_this_turn(card, true) {
+                        Ok(retained) => {
+                            self.log
+                                .push(LogEntry::StateChanged(StateChange::CardRetainChanged {
+                                    card,
+                                    retained,
+                                }));
+                        }
+                        Err(error) => return ApplyResult::StateError(error),
+                    }
+                }
+                ApplyResult::Continue(Vec::new())
+            }
             Effect::AddCardCounter {
                 card,
                 counter,
@@ -679,6 +728,22 @@ impl EffectResolver {
                     self.log
                         .push(LogEntry::StateChanged(StateChange::CardCounterChanged {
                             card,
+                            counter,
+                            value,
+                        }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
+            Effect::SetPowerCounter {
+                power,
+                counter,
+                value,
+            } => match state.set_power_counter(power, counter, value) {
+                Ok(value) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::PowerCounterChanged {
+                            power,
                             counter,
                             value,
                         }));
@@ -727,18 +792,7 @@ impl EffectResolver {
                 target,
                 zero_cost_this_turn,
             } => {
-                let candidates = registry
-                    .cards
-                    .values()
-                    .filter(|def| def.can_generate_in_combat)
-                    .filter(|def| {
-                        card_type
-                            .map(|card_type| def.card_type == card_type)
-                            .unwrap_or(true)
-                    })
-                    .filter(|def| target.map(|target| def.target == target).unwrap_or(true))
-                    .map(|def| def.id)
-                    .collect::<Vec<_>>();
+                let candidates = random_card_candidates(registry, card_type, target);
                 let Some(index) = state
                     .rng
                     .combat_card_generation
@@ -755,11 +809,37 @@ impl EffectResolver {
                     zero_cost_this_turn,
                 }])
             }
+            Effect::DiscoverRandomCardsToHand {
+                player,
+                count,
+                zero_cost_this_turn,
+            } => self.discover_random_cards_to_hand(
+                state,
+                registry,
+                player,
+                count,
+                zero_cost_this_turn,
+            ),
             Effect::PlayTopDrawCards {
                 player,
                 count,
                 exhaust_after_play,
             } => self.apply_play_top_draw_cards(state, registry, player, count, exhaust_after_play),
+            Effect::PlayRandomCardsFromPile {
+                player,
+                pile,
+                filter,
+                count,
+                exhaust_after_play,
+            } => self.apply_play_random_cards_from_pile(
+                state,
+                registry,
+                player,
+                pile,
+                filter,
+                count,
+                exhaust_after_play,
+            ),
             Effect::AddOrbSlots { player, amount } => {
                 match state.add_orb_slots(player, amount) {
                     Ok(actual) => {
@@ -799,6 +879,17 @@ impl EffectResolver {
                 orb,
                 source,
             } => self.channel_orb(state, player, orb, source),
+            Effect::ChannelRandomOrb { player, source } => {
+                let pool = crate::content::orbs::RANDOM_ORB_POOL;
+                let Some(index) = state.rng.combat_orbs.next_usize(pool.len()) else {
+                    return ApplyResult::Continue(Vec::new());
+                };
+                ApplyResult::Continue(vec![Effect::ChannelOrb {
+                    player,
+                    orb: pool[index],
+                    source,
+                }])
+            }
             Effect::EvokeOrb {
                 player,
                 target,
@@ -810,6 +901,17 @@ impl EffectResolver {
                 trigger,
                 target,
             } => self.trigger_orb_passive(state, registry, orb, trigger, target),
+            Effect::AddOrbAmount { orb, amount } => match state.add_orb_amount(orb, amount) {
+                Ok(actual) => {
+                    self.log
+                        .push(LogEntry::StateChanged(StateChange::OrbAmountChanged {
+                            orb,
+                            amount: actual,
+                        }));
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
             Effect::SummonOsty {
                 player,
                 amount,
@@ -915,6 +1017,26 @@ impl EffectResolver {
         }
     }
 
+    fn trigger_event(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        event: Event,
+    ) -> ApplyResult {
+        self.record_event_stats(state, registry, &event);
+        self.log.push(LogEntry::EventTriggered(event.clone()));
+
+        for listener in RulePipeline::event_listeners(state, &event) {
+            let effects = RulePipeline::notify_listener(registry, state, listener, &event);
+            match self.apply_immediate_effects(state, registry, effects) {
+                ApplyResult::Continue(_) => {}
+                other => return other,
+            }
+        }
+
+        ApplyResult::Continue(Vec::new())
+    }
+
     fn select_hand_cards(
         &mut self,
         state: &mut GameState,
@@ -935,7 +1057,58 @@ impl EffectResolver {
         // C# CardSelectCmd.FromHand auto-selects all valid cards when the
         // requested count is exact and the available count is not greater.
         if min == max && cards.len() <= min {
-            let effects = choice_action_effects(state, on_resolve, cards);
+            let effects = choice_action_effects(state, on_resolve, cards, Vec::new());
+            return self.apply_immediate_effects(state, registry, effects);
+        }
+
+        let effective_max = max.min(cards.len());
+        let effective_min = min.min(effective_max);
+        if effective_max == 0 {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let options = cards
+            .into_iter()
+            .map(|card| ChoiceOption {
+                id: ChoiceId::new(card.get()),
+                loc_key: card_loc_key(state, registry, card),
+                value: ChoiceValue::Card(card),
+                enabled: true,
+            })
+            .collect();
+
+        ApplyResult::NeedChoice(crate::core::effect::ChoiceRequest {
+            id: ChoiceId::new(0),
+            kind: ChoiceKind::SelectCard,
+            source,
+            prompt,
+            min: effective_min,
+            max: effective_max,
+            on_resolve,
+            options,
+        })
+    }
+
+    fn select_pile_cards(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        pile: PileKind,
+        filter: CardFilter,
+        min: usize,
+        max: usize,
+        prompt: LocKey,
+        source: Option<Source>,
+        on_resolve: ChoiceAction,
+    ) -> ApplyResult {
+        let cards = matching_pile_cards(state, registry, player, pile, filter);
+        if cards.is_empty() {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        if min == max && cards.len() <= min {
+            let effects = choice_action_effects(state, on_resolve, cards, Vec::new());
             return self.apply_immediate_effects(state, registry, effects);
         }
 
@@ -979,10 +1152,23 @@ impl EffectResolver {
             .iter()
             .filter_map(|option| match option.value {
                 ChoiceValue::Card(card) => Some(card),
-                ChoiceValue::Target(_) | ChoiceValue::None => None,
+                ChoiceValue::CardDef(_) | ChoiceValue::Target(_) | ChoiceValue::None => None,
             })
             .collect::<Vec<_>>();
-        let effects = choice_action_effects(state, resolution.request.on_resolve, selected_cards);
+        let selected_defs = resolution
+            .selected
+            .iter()
+            .filter_map(|option| match option.value {
+                ChoiceValue::CardDef(def) => Some(def),
+                ChoiceValue::Card(_) | ChoiceValue::Target(_) | ChoiceValue::None => None,
+            })
+            .collect::<Vec<_>>();
+        let effects = choice_action_effects(
+            state,
+            resolution.request.on_resolve,
+            selected_cards,
+            selected_defs,
+        );
         self.apply_immediate_effects(state, registry, effects)
     }
 
@@ -1001,6 +1187,23 @@ impl EffectResolver {
                 continue;
             }
             if card_has_keyword(state, registry, card, CardKeyword::Retain) {
+                continue;
+            }
+            if state
+                .card(card)
+                .map(|card| card.flags.retain_this_turn)
+                .unwrap_or(false)
+            {
+                match state.set_card_retain_this_turn(card, false) {
+                    Ok(retained) => {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::CardRetainChanged {
+                                card,
+                                retained,
+                            }));
+                    }
+                    Err(error) => return ApplyResult::StateError(error),
+                }
                 continue;
             }
             if card_has_keyword(state, registry, card, CardKeyword::Ethereal) {
@@ -1122,8 +1325,15 @@ impl EffectResolver {
             ]);
         }
 
-        match state.channel_orb(player, orb) {
+        match state.channel_orb_with_amount(
+            player,
+            orb,
+            crate::content::orbs::initial_orb_amount(orb),
+        ) {
             Ok(instance) => {
+                if orb == crate::content::orbs::LIGHTNING_ORB {
+                    state.record_lightning_orb_channeled();
+                }
                 self.log
                     .push(LogEntry::StateChanged(StateChange::OrbChanneled {
                         orb: instance,
@@ -1771,45 +1981,97 @@ impl EffectResolver {
             })
             .unwrap_or_default();
 
-        let target = state.alive_monster_ids().first().copied();
         for card in cards {
-            let play = crate::core::state::PileId::player(player, PileKind::Play);
-            let effects = vec![
-                Effect::MoveCard {
-                    card,
-                    to: play,
-                    reason: MoveReason::Play,
-                },
-                Effect::Trigger(Event::CardPlayStarted(
-                    crate::core::event::CardPlayStarted {
-                        player,
-                        card,
-                        target,
-                    },
-                )),
-                Effect::PrepareCardPlayResult {
-                    player,
-                    card,
-                    force_exhaust: exhaust_after_play,
-                },
-                Effect::ExecuteCardBody {
-                    player,
-                    card,
-                    target,
-                },
-                Effect::FinishCardPlay {
-                    player,
-                    card,
-                    target,
-                    force_exhaust: exhaust_after_play,
-                },
-            ];
+            let effects = auto_play_card_effects(state, registry, player, card, exhaust_after_play);
             match self.apply_immediate_effects(state, registry, effects) {
                 ApplyResult::Continue(_) => {}
                 other => return other,
             }
         }
         ApplyResult::Continue(Vec::new())
+    }
+
+    fn apply_play_random_cards_from_pile(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: crate::core::ids::PlayerId,
+        pile: PileKind,
+        filter: CardFilter,
+        count: u8,
+        exhaust_after_play: bool,
+    ) -> ApplyResult {
+        let mut cards = matching_pile_cards(state, registry, player, pile, filter);
+        state.rng.shuffle.shuffle(&mut cards);
+        cards.truncate(count as usize);
+
+        for card in cards {
+            let effects = auto_play_card_effects(state, registry, player, card, exhaust_after_play);
+            match self.apply_immediate_effects(state, registry, effects) {
+                ApplyResult::Continue(_) => {}
+                other => return other,
+            }
+            if combat_result_for_state(state).is_some() {
+                break;
+            }
+        }
+        ApplyResult::Continue(Vec::new())
+    }
+
+    fn discover_random_cards_to_hand(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        _player: PlayerId,
+        count: u8,
+        zero_cost_this_turn: bool,
+    ) -> ApplyResult {
+        let mut candidates = random_card_candidates(registry, None, None);
+        let mut defs = Vec::new();
+        for _ in 0..count {
+            let Some(index) = state
+                .rng
+                .combat_card_generation
+                .next_usize(candidates.len())
+            else {
+                break;
+            };
+            defs.push(candidates.swap_remove(index));
+        }
+
+        if defs.is_empty() {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let options = defs
+            .into_iter()
+            .enumerate()
+            .map(|(index, def)| ChoiceOption {
+                id: ChoiceId::new((index + 1) as u32),
+                loc_key: registry
+                    .cards
+                    .get(def)
+                    .map(|def| def.loc_key)
+                    .unwrap_or_else(|| LocKey::new("card.UNKNOWN")),
+                value: ChoiceValue::CardDef(def),
+                enabled: true,
+            })
+            .collect();
+
+        ApplyResult::NeedChoice(crate::core::effect::ChoiceRequest {
+            id: ChoiceId::new(0),
+            kind: ChoiceKind::SelectCard,
+            source: None,
+            prompt: LocKey::new("choice.discover_card"),
+            min: 0,
+            max: 1,
+            on_resolve: ChoiceAction::AddSelectedCardDefsToHand {
+                upgraded: false,
+                temporary: true,
+                zero_cost_this_turn,
+            },
+            options,
+        })
     }
 
     fn resolve_card_payment(
@@ -1988,20 +2250,138 @@ fn matching_hand_cards(
         .hand
         .iter()
         .copied()
-        .filter(|card| match filter {
-            CardFilter::Any => true,
-            CardFilter::Attack => state
-                .card(*card)
-                .and_then(|card| registry.cards.get(card.def))
-                .map(|def| def.card_type == CardType::Attack)
-                .unwrap_or(false),
-            CardFilter::NonAttack => state
-                .card(*card)
-                .and_then(|card| registry.cards.get(card.def))
-                .map(|def| def.card_type != CardType::Attack)
-                .unwrap_or(false),
-        })
+        .filter(|card| card_matches_filter(state, registry, *card, filter))
         .collect()
+}
+
+fn matching_pile_cards(
+    state: &GameState,
+    registry: &StaticRegistry,
+    player: crate::core::ids::PlayerId,
+    pile: PileKind,
+    filter: CardFilter,
+) -> Vec<crate::core::ids::CardInstanceId> {
+    let Some(combat) = state.combat().filter(|combat| combat.player.id == player) else {
+        return Vec::new();
+    };
+    combat
+        .player
+        .piles
+        .pile(pile)
+        .iter()
+        .copied()
+        .filter(|card| card_matches_filter(state, registry, *card, filter))
+        .collect()
+}
+
+fn card_matches_filter(
+    state: &GameState,
+    registry: &StaticRegistry,
+    card: CardInstanceId,
+    filter: CardFilter,
+) -> bool {
+    match filter {
+        CardFilter::Any => true,
+        CardFilter::Attack => state
+            .card(card)
+            .and_then(|card| registry.cards.get(card.def))
+            .map(|def| def.card_type == CardType::Attack)
+            .unwrap_or(false),
+        CardFilter::NonAttack => state
+            .card(card)
+            .and_then(|card| registry.cards.get(card.def))
+            .map(|def| def.card_type != CardType::Attack)
+            .unwrap_or(false),
+        CardFilter::NotRetainedThisTurn => {
+            state
+                .card(card)
+                .map(|card| !card.flags.retain_this_turn)
+                .unwrap_or(false)
+                && !card_has_keyword(state, registry, card, CardKeyword::Retain)
+        }
+    }
+}
+
+fn random_card_candidates(
+    registry: &StaticRegistry,
+    card_type: Option<CardType>,
+    target: Option<TargetType>,
+) -> Vec<CardId> {
+    registry
+        .cards
+        .values()
+        .filter(|def| def.can_generate_in_combat)
+        .filter(|def| {
+            card_type
+                .map(|card_type| def.card_type == card_type)
+                .unwrap_or(true)
+        })
+        .filter(|def| target.map(|target| def.target == target).unwrap_or(true))
+        .map(|def| def.id)
+        .collect()
+}
+
+fn auto_play_card_effects(
+    state: &mut GameState,
+    registry: &StaticRegistry,
+    player: PlayerId,
+    card: CardInstanceId,
+    exhaust_after_play: bool,
+) -> Vec<Effect> {
+    let target = auto_play_target(state, registry, card);
+    let play = PileId::player(player, PileKind::Play);
+    vec![
+        Effect::MoveCard {
+            card,
+            to: play,
+            reason: MoveReason::Play,
+        },
+        Effect::Trigger(Event::CardPlayStarted(
+            crate::core::event::CardPlayStarted {
+                player,
+                card,
+                target,
+            },
+        )),
+        Effect::PrepareCardPlayResult {
+            player,
+            card,
+            force_exhaust: exhaust_after_play,
+        },
+        Effect::ExecuteCardBody {
+            player,
+            card,
+            target,
+        },
+        Effect::FinishCardPlay {
+            player,
+            card,
+            target,
+            force_exhaust: exhaust_after_play,
+        },
+    ]
+}
+
+fn auto_play_target(
+    state: &mut GameState,
+    registry: &StaticRegistry,
+    card: CardInstanceId,
+) -> Option<CreatureId> {
+    let target_type = state
+        .card(card)
+        .and_then(|card| registry.cards.get(card.def))
+        .map(|def| def.target)?;
+    match target_type {
+        TargetType::Enemy | TargetType::AnyCreature => {
+            let enemies = state.alive_monster_ids();
+            state
+                .rng
+                .combat_targets
+                .next_usize(enemies.len())
+                .map(|index| enemies[index])
+        }
+        _ => None,
+    }
 }
 
 fn source_creature(state: &GameState, source: Option<Source>) -> Option<CreatureId> {
@@ -2053,6 +2433,7 @@ fn choice_action_effects(
     state: &GameState,
     action: ChoiceAction,
     cards: Vec<CardInstanceId>,
+    defs: Vec<CardId>,
 ) -> Vec<Effect> {
     match action {
         ChoiceAction::None => Vec::new(),
@@ -2069,6 +2450,19 @@ fn choice_action_effects(
             count,
             upgraded,
         } => selected_discard_then_add_card_effects(state, cards, def, count, upgraded),
+        ChoiceAction::MoveSelectedCardsToPile { pile, reason } => {
+            selected_move_effects(state, cards, pile, reason)
+        }
+        ChoiceAction::RetainSelectedCardsThisTurn => {
+            vec![Effect::RetainCardsThisTurn { cards }]
+        }
+        ChoiceAction::AddSelectedCardDefsToHand {
+            upgraded,
+            temporary,
+            zero_cost_this_turn,
+        } => {
+            selected_add_defs_to_hand_effects(state, defs, upgraded, temporary, zero_cost_this_turn)
+        }
     }
 }
 
@@ -2123,6 +2517,52 @@ fn selected_discard_then_add_card_effects(
         });
     }
     effects
+}
+
+fn selected_move_effects(
+    state: &GameState,
+    cards: Vec<CardInstanceId>,
+    pile: PileKind,
+    reason: MoveReason,
+) -> Vec<Effect> {
+    let Some(player) = cards
+        .first()
+        .and_then(|card| state.card(*card))
+        .map(|card| card.owner)
+        .or_else(|| state.player_id())
+    else {
+        return Vec::new();
+    };
+    cards
+        .into_iter()
+        .map(|card| Effect::MoveCard {
+            card,
+            to: PileId::player(player, pile),
+            reason,
+        })
+        .collect()
+}
+
+fn selected_add_defs_to_hand_effects(
+    state: &GameState,
+    defs: Vec<CardId>,
+    upgraded: bool,
+    temporary: bool,
+    zero_cost_this_turn: bool,
+) -> Vec<Effect> {
+    let Some(player) = state.player_id() else {
+        return Vec::new();
+    };
+    defs.into_iter()
+        .map(|def| Effect::AddGeneratedCard {
+            player,
+            def,
+            to: PileId::player(player, PileKind::Hand),
+            upgraded,
+            temporary,
+            zero_cost_this_turn,
+        })
+        .collect()
 }
 
 fn card_has_keyword(
@@ -2300,6 +2740,7 @@ fn start_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
                         amount: -diff,
                     });
                 }
+                effects.push(Effect::Trigger(Event::BeforeHandDraw { player }));
                 effects.push(Effect::DrawHandCards {
                     player,
                     count: BASE_HAND_DRAW_COUNT,
@@ -2416,6 +2857,8 @@ mod tests {
     const TEST_STRENGTH: PowerId = PowerId::new("test_strength");
     const TEST_CANNOT_DIE: PowerId = PowerId::new("test_cannot_die");
     const TEST_OSTY_REDIRECT: PowerId = PowerId::new("test_osty_redirect");
+    const TEST_MARK_ON_CARD_PLAY: PowerId = PowerId::new("test_mark_on_card_play");
+    const TEST_OBSERVE_ON_CARD_PLAY: PowerId = PowerId::new("test_observe_on_card_play");
     const TEST_RELIC: RelicId = RelicId::new("test_relic");
     const TEST_ORB: OrbId = OrbId::new("test_orb");
 
@@ -2513,6 +2956,72 @@ mod tests {
             loc_key: LocKey::new("power.test_cannot_die"),
             rules: PowerRules {
                 decide: Some(prevent_owner_death),
+                ..PowerRules::default()
+            },
+        }
+    }
+
+    fn mark_on_card_play(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+        if !matches!(event, Event::CardPlayed(_)) {
+            return Vec::new();
+        }
+        ctx.state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+            .map(|instance| {
+                vec![Effect::ApplyPower {
+                    target: instance.owner,
+                    power: TEST_STRENGTH,
+                    amount: Decimal::from(1),
+                    source: Some(Source::Power(power)),
+                }]
+            })
+            .unwrap_or_default()
+    }
+
+    fn observe_marker_on_card_play(
+        ctx: &RuleCtx<'_>,
+        power: PowerInstanceId,
+        event: &Event,
+    ) -> Vec<Effect> {
+        if !matches!(event, Event::CardPlayed(_)) {
+            return Vec::new();
+        }
+        let Some(owner) = ctx
+            .state
+            .combat()
+            .and_then(|combat| combat.powers.get(&power))
+            .map(|instance| instance.owner)
+        else {
+            return Vec::new();
+        };
+        if ctx.state.power_amount(owner, TEST_STRENGTH) <= 0 {
+            return Vec::new();
+        }
+        vec![Effect::GainBlock {
+            target: owner,
+            amount: Decimal::from(1),
+            source: Some(Source::Power(power)),
+        }]
+    }
+
+    fn mark_on_card_play_def() -> PowerDef {
+        PowerDef {
+            id: TEST_MARK_ON_CARD_PLAY,
+            loc_key: LocKey::new("power.test_mark_on_card_play"),
+            rules: PowerRules {
+                on_event: Some(mark_on_card_play),
+                ..PowerRules::default()
+            },
+        }
+    }
+
+    fn observe_on_card_play_def() -> PowerDef {
+        PowerDef {
+            id: TEST_OBSERVE_ON_CARD_PLAY,
+            loc_key: LocKey::new("power.test_observe_on_card_play"),
+            rules: PowerRules {
+                on_event: Some(observe_marker_on_card_play),
                 ..PowerRules::default()
             },
         }
@@ -3177,6 +3686,38 @@ mod tests {
         assert!(matches!(result, StepResult::Done(_)));
         let enemy = engine.state.creature(target).unwrap();
         assert_eq!(enemy.hp, 24);
+    }
+
+    #[test]
+    fn event_listener_effects_are_drained_before_next_listener() {
+        let mut registry = StaticRegistry::default();
+        registry.cards.register(test_strike_def());
+        registry.powers.register(mark_on_card_play_def());
+        registry.powers.register(observe_on_card_play_def());
+
+        let mut engine = Engine::with_registry(GameState::demo_combat(18), registry);
+        let player = engine.state.player_id().unwrap();
+        let player_creature = engine.state.player_creature_id().unwrap();
+        engine
+            .state
+            .apply_power(player_creature, TEST_MARK_ON_CARD_PLAY, Decimal::from(1))
+            .unwrap();
+        engine
+            .state
+            .apply_power(player_creature, TEST_OBSERVE_ON_CARD_PLAY, Decimal::from(1))
+            .unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        let target = engine.state.combat().unwrap().monster_ids()[0];
+
+        let result = engine.step(Command::PlayCard {
+            player,
+            card,
+            target: Some(target),
+        });
+
+        assert!(matches!(result, StepResult::Done(_)));
+        assert_eq!(engine.state.power_amount(player_creature, TEST_STRENGTH), 1);
+        assert_eq!(engine.state.creature(player_creature).unwrap().block, 1);
     }
 
     #[test]

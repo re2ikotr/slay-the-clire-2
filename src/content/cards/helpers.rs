@@ -9,7 +9,7 @@
 
 use rust_decimal::Decimal;
 
-use super::{CardPlayCtx, CardTag, CardType};
+use super::{CardKeyword, CardPlayCtx, CardTag, CardType};
 use crate::core::effect::{
     CardFilter, DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect, RandomDamageOp,
     Source,
@@ -231,10 +231,7 @@ pub(crate) fn is_upgraded(ctx: &CardPlayCtx<'_>, card: CardInstanceId) -> bool {
 }
 
 /// All cards in the player's hand matching `filter`.
-pub(crate) fn hand_matching(
-    ctx: &CardPlayCtx<'_>,
-    filter: CardFilter,
-) -> Vec<CardInstanceId> {
+pub(crate) fn hand_matching(ctx: &CardPlayCtx<'_>, filter: CardFilter) -> Vec<CardInstanceId> {
     let Some(combat) = ctx.state.combat() else {
         return Vec::new();
     };
@@ -299,6 +296,18 @@ pub(crate) fn card_matches_filter(
             .and_then(|card| ctx.registry.cards.get(card.def))
             .map(|def| def.card_type != CardType::Attack)
             .unwrap_or(false),
+        CardFilter::NotRetainedThisTurn => {
+            ctx.state
+                .card(card)
+                .map(|card| !card.flags.retain_this_turn)
+                .unwrap_or(false)
+                && !ctx
+                    .state
+                    .card(card)
+                    .and_then(|card| ctx.registry.cards.get(card.def).map(|def| (card, def)))
+                    .map(|(card, def)| def.has_keyword(card.upgraded, CardKeyword::Retain))
+                    .unwrap_or(false)
+        }
     }
 }
 

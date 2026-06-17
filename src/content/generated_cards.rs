@@ -8,16 +8,18 @@ use crate::content::cards::{
     CardDef, CardKeyword, CardPlayCtx, CardPoolId, CardRarity, CardRules, CardTag, CardType,
     TargetType,
 };
-use crate::content::orbs::{DARK_ORB, FROST_ORB, LIGHTNING_ORB, PLASMA_ORB};
+use crate::content::orbs::{DARK_ORB, FROST_ORB, GLASS_ORB, LIGHTNING_ORB, PLASMA_ORB};
 use crate::content::powers::*;
 use crate::core::effect::{
     CardFilter, ChoiceAction, DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, DiscardKind,
-    Effect, OrbSelection, OrbTrigger, RandomDamageOp, Source,
+    Effect, MoveReason, OrbSelection, OrbTrigger, RandomDamageOp, Source,
 };
 use crate::core::event::Event;
 use crate::core::ids::{CardId, CardInstanceId, CreatureId, LocKey, PlayerId, PowerId};
 use crate::core::rules::RuleCtx;
-use crate::core::state::{CardCost, CardCosts, PileId, PileKind, PlayerPetKind, ResourceKind};
+use crate::core::state::{
+    CardCost, CardCosts, PileId, PileKind, PlayerPetKind, ResourceKind, MAX_CARDS_IN_HAND,
+};
 use crate::registry::DefRegistry;
 
 macro_rules! card_ids { ($($name:ident => $id:literal,)*) => { $(pub const $name: CardId = CardId::new($id);)* }; }
@@ -1027,8 +1029,13 @@ const POWERS_PHANTOM_BLADES: &[PowerApplySpec] = &[PowerApplySpec {
     upgraded_amount: 12,
 }];
 const SPAWNS_PHANTOM_BLADES: &[CardId] = &[SHIV];
+const POWERS_PANACHE: &[PowerApplySpec] = &[PowerApplySpec {
+    power: PANACHE_POWER,
+    base_amount: 10,
+    upgraded_amount: 14,
+}];
 const POWERS_SPEEDSTER: &[PowerApplySpec] = &[PowerApplySpec {
-    power: PowerId::new("POWER_SPEEDSTER"),
+    power: SPEEDSTER_POWER,
     base_amount: 1,
     upgraded_amount: 2,
 }];
@@ -1050,6 +1057,16 @@ const POWERS_ABRASIVE: &[PowerApplySpec] = &[
         upgraded_amount: 1,
     },
 ];
+const POWERS_CREATIVE_AI: &[PowerApplySpec] = &[PowerApplySpec {
+    power: CREATIVE_AI_POWER,
+    base_amount: 1,
+    upgraded_amount: 1,
+}];
+const POWERS_WELL_LAID_PLANS: &[PowerApplySpec] = &[PowerApplySpec {
+    power: WELL_LAID_PLANS_POWER,
+    base_amount: 1,
+    upgraded_amount: 2,
+}];
 const POWERS_AFTERIMAGE: &[PowerApplySpec] = &[PowerApplySpec {
     power: AFTERIMAGE_POWER,
     base_amount: 1,
@@ -1415,7 +1432,7 @@ const CATALOG_CARD_SPECS: &[CatalogCardSpec] = &[
         keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
         damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
         hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
+        powers: POWERS_PANACHE, spawns: SPAWN_NONE, damage_ignores_block: false,
     },
     CatalogCardSpec {
         id: PANIC_BUTTON, loc_key: LocKey::new("card.PANIC_BUTTON"),
@@ -2723,7 +2740,7 @@ const CATALOG_CARD_SPECS: &[CatalogCardSpec] = &[
         keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
         damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
         hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
+        powers: POWERS_CREATIVE_AI, spawns: SPAWN_NONE, damage_ignores_block: false,
     },
     CatalogCardSpec {
         id: DEFRAGMENT, loc_key: LocKey::new("card.DEFRAGMENT"),
@@ -6179,7 +6196,7 @@ const CATALOG_CARD_SPECS: &[CatalogCardSpec] = &[
         keywords: KW_NONE, upgraded_keywords: KW_NONE, tags: TAG_NONE, can_generate_in_combat: true,
         damage: None, block: None, draw: None, energy: None, stars: None, hp_loss: None,
         hit_count: None, repeat: None, summon: None, osty_damage: None, poison_per_turn: None,
-        powers: POWER_NONE, spawns: SPAWN_NONE, damage_ignores_block: false,
+        powers: POWERS_WELL_LAID_PLANS, spawns: SPAWN_NONE, damage_ignores_block: false,
     },
     CatalogCardSpec {
         id: ABRASIVE, loc_key: LocKey::new("card.ABRASIVE"),
@@ -6736,6 +6753,24 @@ fn special_play(
         .unwrap_or(false);
     let mut effects = Vec::new();
     match spec.id {
+        DISCOVERY => {
+            effects.push(Effect::DiscoverRandomCardsToHand {
+                player,
+                count: 3,
+                zero_cost_this_turn: true,
+            });
+            Some(effects)
+        }
+        BEAT_DOWN => {
+            effects.push(Effect::PlayRandomCardsFromPile {
+                player,
+                pile: PileKind::Discard,
+                filter: CardFilter::Attack,
+                count: if upgraded { 4 } else { 3 },
+                exhaust_after_play: false,
+            });
+            Some(effects)
+        }
         ACROBATICS => {
             effects.push(Effect::DrawCards {
                 player,
@@ -6796,6 +6831,30 @@ fn special_play(
                 kind: DiscardKind::Manual,
             });
             effects.push(Effect::DrawCards { player, count });
+            Some(effects)
+        }
+        DREDGE => {
+            let hand_size = ctx
+                .state
+                .combat()
+                .map(|combat| combat.player.piles.hand.len())
+                .unwrap_or(0);
+            let count = 3usize.min(MAX_CARDS_IN_HAND.saturating_sub(hand_size));
+            if count > 0 {
+                effects.push(Effect::SelectPileCards {
+                    player,
+                    pile: PileKind::Discard,
+                    filter: CardFilter::Any,
+                    min: count,
+                    max: count,
+                    prompt: LocKey::new("choice.dredge"),
+                    source: Some(Source::Card(card)),
+                    on_resolve: ChoiceAction::MoveSelectedCardsToPile {
+                        pile: PileKind::Hand,
+                        reason: MoveReason::Generated,
+                    },
+                });
+            }
             Some(effects)
         }
         STORM_OF_STEEL => {
@@ -6870,7 +6929,7 @@ fn special_play(
             Some(effects)
         }
         MULTI_CAST => {
-            let count = ctx.paid_energy.max(0) as u8;
+            let count = x_value(ctx.paid_energy, upgraded);
             for index in 0..count {
                 effects.push(Effect::EvokeOrb {
                     player,
@@ -6884,6 +6943,11 @@ fn special_play(
         BALL_LIGHTNING => {
             effects.extend(generic_play(ctx, spec, card, target));
             effects.push(channel(player, LIGHTNING_ORB, card));
+            Some(effects)
+        }
+        COOLHEADED => {
+            effects.push(channel(player, FROST_ORB, card));
+            effects.extend(generic_play(ctx, spec, card, target));
             Some(effects)
         }
         COLD_SNAP => {
@@ -6917,7 +6981,10 @@ fn special_play(
         CHAOS => {
             let count = value_u8(spec.repeat, upgraded).unwrap_or(1);
             for _ in 0..count {
-                effects.push(channel(player, LIGHTNING_ORB, card));
+                effects.push(Effect::ChannelRandomOrb {
+                    player,
+                    source: Some(Source::Card(card)),
+                });
             }
             Some(effects)
         }
@@ -6942,9 +7009,166 @@ fn special_play(
             Some(effects)
         }
         TEMPEST => {
-            for _ in 0..ctx.paid_energy.max(0) {
-                effects.push(channel(player, LIGHTNING_ORB, card));
+            channel_many(
+                &mut effects,
+                player,
+                LIGHTNING_ORB,
+                card,
+                x_value(ctx.paid_energy, upgraded),
+            );
+            Some(effects)
+        }
+        BULK_UP => {
+            effects.push(Effect::RemoveOrbSlots { player, amount: 1 });
+            effects.extend(generic_play(ctx, spec, card, target));
+            Some(effects)
+        }
+        CAPACITOR => {
+            effects.push(Effect::AddOrbSlots {
+                player,
+                amount: value_u8(spec.repeat, upgraded).unwrap_or(2),
+            });
+            Some(effects)
+        }
+        MODDED => {
+            effects.push(Effect::AddOrbSlots { player, amount: 1 });
+            effects.extend(generic_play(ctx, spec, card, target));
+            Some(effects)
+        }
+        QUADCAST => {
+            let count = value_u8(spec.repeat, upgraded).unwrap_or(4);
+            for index in 0..count {
+                effects.push(Effect::EvokeOrb {
+                    player,
+                    target: OrbSelection::Last,
+                    remove: index + 1 == count,
+                    source: Some(Source::Card(card)),
+                });
             }
+            Some(effects)
+        }
+        SHATTER => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            if let Some(combat) = ctx.state.combat() {
+                for orb in combat
+                    .player
+                    .orb_queue
+                    .orbs
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                {
+                    effects.push(Effect::EvokeOrb {
+                        player,
+                        target: OrbSelection::Exact(orb),
+                        remove: true,
+                        source: Some(Source::Card(card)),
+                    });
+                }
+            }
+            Some(effects)
+        }
+        TESLA_COIL => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            if let Some(combat) = ctx.state.combat() {
+                for orb in combat.player.orb_queue.orbs.iter().copied() {
+                    if ctx
+                        .state
+                        .orb(orb)
+                        .map(|orb| orb.def == LIGHTNING_ORB)
+                        .unwrap_or(false)
+                    {
+                        effects.push(Effect::TriggerOrbPassive {
+                            orb,
+                            trigger: OrbTrigger::BeforeTurnEnd,
+                            target,
+                        });
+                    }
+                }
+            }
+            Some(effects)
+        }
+        GLASSWORK => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            effects.push(channel(player, GLASS_ORB, card));
+            Some(effects)
+        }
+        NULL => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            effects.push(channel(player, DARK_ORB, card));
+            Some(effects)
+        }
+        SHADOW_SHIELD => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            effects.push(channel(player, DARK_ORB, card));
+            Some(effects)
+        }
+        CONSUMING_SHADOW => {
+            channel_many(
+                &mut effects,
+                player,
+                DARK_ORB,
+                card,
+                value_u8(spec.repeat, upgraded).unwrap_or(2),
+            );
+            effects.extend(generic_play(ctx, spec, card, target));
+            Some(effects)
+        }
+        ICE_LANCE => {
+            let amount = value_i32(spec.damage, upgraded).unwrap_or(19);
+            if let Some(target) = target.or_else(|| ctx.state.alive_monster_ids().first().copied())
+            {
+                effects.push(Effect::DealDamage(DamageOp {
+                    source: Some(Source::Card(card)),
+                    dealer: Some(player_creature),
+                    target,
+                    base_amount: Decimal::from(amount),
+                    kind: DamageKind::Attack,
+                    flags: DamageFlags {
+                        ignores_block: false,
+                    },
+                }));
+            }
+            channel_many(
+                &mut effects,
+                player,
+                FROST_ORB,
+                card,
+                value_u8(spec.repeat, upgraded).unwrap_or(3),
+            );
+            Some(effects)
+        }
+        METEOR_STRIKE => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            channel_many(&mut effects, player, PLASMA_ORB, card, 3);
+            Some(effects)
+        }
+        REFRACT => {
+            effects.extend(generic_play(ctx, spec, card, target));
+            channel_many(
+                &mut effects,
+                player,
+                GLASS_ORB,
+                card,
+                value_u8(spec.repeat, upgraded).unwrap_or(2),
+            );
+            Some(effects)
+        }
+        SPINNER => {
+            if upgraded {
+                effects.push(channel(player, GLASS_ORB, card));
+            }
+            effects.extend(generic_play(ctx, spec, card, target));
+            Some(effects)
+        }
+        VOLTAIC => {
+            let count = ctx
+                .state
+                .combat()
+                .map(|combat| combat.combat_stats.lightning_orbs_channeled)
+                .unwrap_or(0)
+                .min(u32::from(u8::MAX)) as u8;
+            channel_many(&mut effects, player, LIGHTNING_ORB, card, count);
             Some(effects)
         }
         STARDUST => {
@@ -6983,6 +7207,46 @@ fn special_play(
         }
         CALAMITY => {
             effects.push(apply_self_power(player_creature, CALAMITY_POWER, 1, card));
+            Some(effects)
+        }
+        MALAISE => {
+            let amount = i32::from(x_value(ctx.paid_energy, upgraded));
+            if let Some(target) = target {
+                effects.push(Effect::ApplyPower {
+                    target,
+                    power: STRENGTH,
+                    amount: Decimal::from(-amount),
+                    source: Some(Source::Card(card)),
+                });
+                effects.push(Effect::ApplyPower {
+                    target,
+                    power: WEAK,
+                    amount: Decimal::from(amount),
+                    source: Some(Source::Card(card)),
+                });
+            }
+            Some(effects)
+        }
+        DIRGE => {
+            let x = ctx.paid_energy.max(0).min(i32::from(u8::MAX)) as u8;
+            let summon = value_i32(spec.summon, upgraded).unwrap_or(3);
+            for _ in 0..x {
+                effects.push(Effect::SummonOsty {
+                    player,
+                    amount: Decimal::from(summon),
+                    source: Some(Source::Card(card)),
+                });
+            }
+            add_generated(
+                &mut effects,
+                player,
+                SOUL,
+                PileKind::Draw,
+                x,
+                upgraded,
+                true,
+                false,
+            );
             Some(effects)
         }
         FLASH_OF_STEEL => {
@@ -7230,17 +7494,12 @@ fn push_power_effects(
                 }
             }
             TargetType::RandomEnemy => {
-                if let Some(enemy) = ctx.state.alive_monster_ids().first().copied() {
-                    let count = value_u8(spec.repeat, upgraded).unwrap_or(1).max(1);
-                    for _ in 0..count {
-                        effects.push(Effect::ApplyPower {
-                            target: enemy,
-                            power: power.power,
-                            amount: Decimal::from(amount),
-                            source: Some(Source::Card(card)),
-                        });
-                    }
-                }
+                effects.push(Effect::ApplyPowerToRandomEnemy {
+                    power: power.power,
+                    amount: Decimal::from(amount),
+                    source: Some(Source::Card(card)),
+                    count: value_u8(spec.repeat, upgraded).unwrap_or(1).max(1),
+                });
             }
             _ => {
                 if let Some(target) =
@@ -7343,6 +7602,18 @@ fn channel(player: PlayerId, orb: crate::core::ids::OrbId, card: CardInstanceId)
     }
 }
 
+fn channel_many(
+    effects: &mut Vec<Effect>,
+    player: PlayerId,
+    orb: crate::core::ids::OrbId,
+    card: CardInstanceId,
+    count: u8,
+) {
+    for _ in 0..count {
+        effects.push(channel(player, orb, card));
+    }
+}
+
 fn apply_self_power(
     target: CreatureId,
     power: PowerId,
@@ -7407,6 +7678,12 @@ fn value_i32(pair: Option<(i32, i32)>, upgraded: bool) -> Option<i32> {
 
 fn value_u8(pair: Option<(u8, u8)>, upgraded: bool) -> Option<u8> {
     pair.map(|(base, up)| if upgraded { up } else { base })
+}
+
+fn x_value(paid: i32, upgraded_bonus: bool) -> u8 {
+    paid.max(0)
+        .saturating_add(if upgraded_bonus { 1 } else { 0 })
+        .min(i32::from(u8::MAX)) as u8
 }
 
 fn catalog_card_on_event(ctx: &RuleCtx<'_>, card: CardInstanceId, event: &Event) -> Vec<Effect> {
@@ -7504,7 +7781,7 @@ mod tests {
     use crate::content::cards::{register_all_cards, CardPoolId};
     use crate::core::command::Command;
     use crate::core::engine::{Engine, StepResult};
-    use crate::core::state::{CombatSetupCard, CombatSetupMonster, GameState, Side};
+    use crate::core::state::{CombatSetupCard, CombatSetupMonster, GameState, OrbQueue, Side};
     use crate::registry::StaticRegistry;
 
     fn combat_with(card: CardId, upgraded: bool, energy: i32, stars: i32) -> Engine {
@@ -7605,6 +7882,299 @@ mod tests {
             StepResult::Done(_) | StepResult::CombatOver(_, _)
         ));
         assert!(engine.state.creature(enemy).unwrap().hp < hp);
+    }
+
+    #[test]
+    fn random_power_and_orb_cards_use_dedicated_rng_streams() {
+        let mut engine = combat_with(BOUNCING_FLASK, false, 3, 0);
+        let player = engine.state.player_id().unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card,
+                target: None
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.rng.combat_targets.counter(), 3);
+        let total_poison = engine
+            .state
+            .alive_monster_ids()
+            .into_iter()
+            .map(|enemy| engine.state.power_amount(enemy, POISON_POWER))
+            .sum::<i32>();
+        assert_eq!(total_poison, 9);
+
+        let mut engine = combat_with(CHAOS, false, 3, 0);
+        let player = engine.state.player_id().unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card,
+                target: None
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.rng.combat_orbs.counter(), 1);
+        let orb = engine.state.combat().unwrap().player.orb_queue.orbs[0];
+        let orb_def = engine.state.orb(orb).unwrap().def;
+        assert!(crate::content::orbs::RANDOM_ORB_POOL.contains(&orb_def));
+    }
+
+    #[test]
+    fn defect_glass_and_channel_representatives_follow_card_specific_behavior() {
+        let mut engine = combat_with(GLASSWORK, false, 3, 0);
+        let player = engine.state.player_id().unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card,
+                target: None
+            }),
+            StepResult::Done(_)
+        ));
+        let orb = engine.state.combat().unwrap().player.orb_queue.orbs[0];
+        let glass = engine.state.orb(orb).unwrap();
+        assert_eq!(glass.def, GLASS_ORB);
+        assert_eq!(glass.amount, 4);
+
+        let mut engine = combat_with(ICE_LANCE, false, 3, 0);
+        engine.state.combat_mut().unwrap().player.orb_queue = OrbQueue::with_base_slots(3);
+        let player = engine.state.player_id().unwrap();
+        let card = engine.state.combat().unwrap().player.piles.hand[0];
+        let enemy = engine.state.alive_monster_ids()[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card,
+                target: Some(enemy)
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.creature(enemy).unwrap().hp, 61);
+        assert_eq!(
+            engine.state.combat().unwrap().player.orb_queue.orbs.len(),
+            3
+        );
+    }
+
+    #[test]
+    fn colorless_discovery_and_beat_down_use_shared_generation_and_autoplay() {
+        let mut engine = combat_with(DISCOVERY, false, 1, 0);
+        let player = engine.state.player_id().unwrap();
+        let discovery = engine.state.combat().unwrap().player.piles.hand[0];
+        let StepResult::NeedChoice(choice, _) = engine.step(Command::PlayCard {
+            player,
+            card: discovery,
+            target: None,
+        }) else {
+            panic!("Discovery should request a generated-card choice");
+        };
+        assert_eq!(choice.options.len(), 3);
+        assert!(choice
+            .options
+            .iter()
+            .all(|option| matches!(option.value, crate::core::effect::ChoiceValue::CardDef(_))));
+        let first = choice.options[0].id;
+        assert!(matches!(
+            engine.step(Command::Choose {
+                request: choice.id,
+                options: vec![first],
+            }),
+            StepResult::Done(_)
+        ));
+        let generated = engine.state.combat().unwrap().player.piles.hand[0];
+        let generated = engine.state.card(generated).unwrap();
+        assert!(generated.flags.temporary);
+        assert!(generated.flags.zero_cost_this_turn);
+        assert_eq!(generated.effective_costs().energy, CardCost::Fixed(0));
+
+        let mut engine = combat_with(BEAT_DOWN, false, 3, 0);
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.alive_monster_ids()[0];
+        let strike_costs = engine
+            .registry
+            .cards
+            .get(STRIKE_SILENT)
+            .unwrap()
+            .costs_for(false);
+        for _ in 0..3 {
+            engine
+                .state
+                .add_generated_card(
+                    player,
+                    STRIKE_SILENT,
+                    PileId::player(player, PileKind::Discard),
+                    false,
+                    strike_costs,
+                    false,
+                    false,
+                )
+                .unwrap();
+        }
+        let beat_down = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: beat_down,
+                target: None,
+            }),
+            StepResult::Done(_) | StepResult::CombatOver(_, _)
+        ));
+        assert_eq!(engine.state.creature(enemy).unwrap().hp, 62);
+    }
+
+    #[test]
+    fn necrobinder_dredge_and_dirge_use_pile_and_x_effects() {
+        let mut engine = combat_with(DREDGE, false, 1, 0);
+        let player = engine.state.player_id().unwrap();
+        let strike_costs = engine
+            .registry
+            .cards
+            .get(STRIKE_NECROBINDER)
+            .unwrap()
+            .costs_for(false);
+        for _ in 0..2 {
+            engine
+                .state
+                .add_generated_card(
+                    player,
+                    STRIKE_NECROBINDER,
+                    PileId::player(player, PileKind::Discard),
+                    false,
+                    strike_costs,
+                    false,
+                    false,
+                )
+                .unwrap();
+        }
+        let dredge = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: dredge,
+                target: None,
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.combat().unwrap().player.piles.hand.len(), 2);
+
+        let mut engine = combat_with(DIRGE, false, 2, 0);
+        let player = engine.state.player_id().unwrap();
+        let dirge = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: dirge,
+                target: None,
+            }),
+            StepResult::Done(_)
+        ));
+        let osty = engine
+            .state
+            .combat()
+            .unwrap()
+            .creatures
+            .iter()
+            .find(|creature| creature.pet_kind == Some(PlayerPetKind::Osty))
+            .unwrap();
+        assert_eq!(osty.max_hp, 6);
+        let draw = &engine.state.combat().unwrap().player.piles.draw;
+        assert_eq!(draw.len(), 2);
+        assert!(draw
+            .iter()
+            .all(|card| engine.state.card(*card).unwrap().def == SOUL));
+    }
+
+    #[test]
+    fn silent_malaise_and_well_laid_plans_use_shared_power_paths() {
+        let mut engine = combat_with(MALAISE, true, 2, 0);
+        let player = engine.state.player_id().unwrap();
+        let enemy = engine.state.alive_monster_ids()[0];
+        let malaise = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: malaise,
+                target: Some(enemy),
+            }),
+            StepResult::Done(_)
+        ));
+        assert_eq!(engine.state.power_amount(enemy, STRENGTH), -3);
+        assert_eq!(engine.state.power_amount(enemy, WEAK), 3);
+
+        let mut engine = combat_with(WELL_LAID_PLANS, false, 1, 0);
+        let player = engine.state.player_id().unwrap();
+        let costs = engine
+            .registry
+            .cards
+            .get(STRIKE_SILENT)
+            .unwrap()
+            .costs_for(false);
+        let retained = engine
+            .state
+            .add_generated_card(
+                player,
+                STRIKE_SILENT,
+                PileId::player(player, PileKind::Hand),
+                false,
+                costs,
+                false,
+                false,
+            )
+            .unwrap();
+        let discarded = engine
+            .state
+            .add_generated_card(
+                player,
+                STRIKE_SILENT,
+                PileId::player(player, PileKind::Hand),
+                false,
+                costs,
+                false,
+                false,
+            )
+            .unwrap();
+        let well_laid_plans = engine.state.combat().unwrap().player.piles.hand[0];
+        assert!(matches!(
+            engine.step(Command::PlayCard {
+                player,
+                card: well_laid_plans,
+                target: None,
+            }),
+            StepResult::Done(_)
+        ));
+        let StepResult::NeedChoice(choice, _) =
+            engine.step(Command::EndTurn { side: Side::Player })
+        else {
+            panic!("Well-Laid Plans should choose a card to retain before cleanup");
+        };
+        let retain_option = choice
+            .options
+            .iter()
+            .find(|option| option.value == crate::core::effect::ChoiceValue::Card(retained))
+            .unwrap()
+            .id;
+        let StepResult::Done(log) = engine.step(Command::Choose {
+            request: choice.id,
+            options: vec![retain_option],
+        }) else {
+            panic!("retention choice should resolve");
+        };
+        assert!(engine.state.card_is_in_pile(retained, PileKind::Hand));
+        assert!(log.iter().any(|entry| matches!(
+            entry,
+            crate::core::log::LogEntry::StateChanged(crate::core::log::StateChange::CardMoved {
+                card,
+                to,
+                reason: MoveReason::Discard,
+                ..
+            }) if *card == discarded && to.kind == PileKind::Discard
+        )));
+        assert!(!engine.state.card(retained).unwrap().flags.retain_this_turn);
     }
 
     #[test]

@@ -48,9 +48,19 @@ pub const LIGHTNING_ORB: OrbId = OrbId::new("LIGHTNING_ORB");
 pub const FROST_ORB: OrbId = OrbId::new("FROST_ORB");
 pub const DARK_ORB: OrbId = OrbId::new("DARK_ORB");
 pub const PLASMA_ORB: OrbId = OrbId::new("PLASMA_ORB");
+pub const GLASS_ORB: OrbId = OrbId::new("GLASS_ORB");
+
+pub const RANDOM_ORB_POOL: &[OrbId] = &[LIGHTNING_ORB, FROST_ORB, DARK_ORB, PLASMA_ORB, GLASS_ORB];
+
+pub fn initial_orb_amount(orb: OrbId) -> i32 {
+    match orb {
+        GLASS_ORB => 4,
+        _ => 0,
+    }
+}
 
 pub fn register_core_orbs(registry: &mut DefRegistry<OrbId, OrbDef>) {
-    for def in [lightning(), frost(), dark(), plasma()] {
+    for def in [lightning(), frost(), dark(), plasma(), glass()] {
         registry.register(def);
     }
 }
@@ -91,6 +101,16 @@ fn plasma() -> OrbDef {
         loc_key: LocKey::new("orb.plasma"),
         passive: plasma_passive,
         evoke: plasma_evoke,
+        rules: OrbRules::default(),
+    }
+}
+
+fn glass() -> OrbDef {
+    OrbDef {
+        id: GLASS_ORB,
+        loc_key: LocKey::new("orb.glass"),
+        passive: glass_passive,
+        evoke: glass_evoke,
         rules: OrbRules::default(),
     }
 }
@@ -282,6 +302,74 @@ fn plasma_energy(ctx: &RuleCtx<'_>, orb: OrbInstanceId, amount: i32) -> Vec<Effe
             }]
         })
         .unwrap_or_default()
+}
+
+fn glass_passive(
+    ctx: &RuleCtx<'_>,
+    orb: OrbInstanceId,
+    trigger: OrbTrigger,
+    _target: Option<crate::core::ids::CreatureId>,
+) -> Vec<Effect> {
+    if trigger != OrbTrigger::BeforeTurnEnd {
+        return Vec::new();
+    }
+    let Some(instance) = ctx.state.orb(orb) else {
+        return Vec::new();
+    };
+    if instance.amount <= 0 {
+        return Vec::new();
+    }
+    let amount = resolve_orb_value(
+        ctx,
+        orb,
+        instance.amount,
+        crate::core::query::OrbValueKind::Passive,
+    );
+    vec![
+        Effect::DealDamageToAllEnemies(crate::core::effect::DamageAllEnemiesOp {
+            source: Some(Source::System),
+            dealer: ctx.state.orb_owner_creature(orb),
+            base_amount: amount,
+            kind: DamageKind::Power,
+            flags: DamageFlags {
+                ignores_block: false,
+            },
+            hit_count: 1,
+        }),
+        Effect::AddOrbAmount { orb, amount: -1 },
+    ]
+}
+
+fn glass_evoke(
+    ctx: &RuleCtx<'_>,
+    orb: OrbInstanceId,
+    _trigger: OrbTrigger,
+    _target: Option<crate::core::ids::CreatureId>,
+) -> Vec<Effect> {
+    let Some(instance) = ctx.state.orb(orb) else {
+        return Vec::new();
+    };
+    if instance.amount <= 0 {
+        return Vec::new();
+    }
+    let amount = resolve_orb_value(
+        ctx,
+        orb,
+        instance.amount.saturating_mul(2),
+        crate::core::query::OrbValueKind::Evoke,
+    );
+    vec![Effect::DealDamageToAllEnemies(
+        crate::core::effect::DamageAllEnemiesOp {
+            source: Some(Source::System),
+            dealer: ctx.state.orb_owner_creature(orb),
+            base_amount: amount,
+            kind: DamageKind::Power,
+            flags: DamageFlags {
+                ignores_block: false,
+            },
+            hit_count: 1,
+        },
+    )]
 }
 
 #[allow(dead_code)]

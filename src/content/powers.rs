@@ -1,7 +1,9 @@
 use rust_decimal::Decimal;
 
 use crate::content::cards::{CardTag, CardType};
-use crate::core::effect::{DamageFlags, DamageKind, DamageOp, Effect, Source};
+use crate::core::effect::{
+    CardFilter, ChoiceAction, DamageAllEnemiesOp, DamageFlags, DamageKind, DamageOp, Effect, Source,
+};
 use crate::core::event::Event;
 use crate::core::ids::{LocKey, PowerId, PowerInstanceId};
 use crate::core::query::{
@@ -10,7 +12,9 @@ use crate::core::query::{
     PreventReason, ResourceCostCalc, SummonAmountCalc, UnblockedDamageTargetCalc,
 };
 use crate::core::rules::{prevent_by_current_listener, RuleCtx};
-use crate::core::state::{PileId, PileKind, PlayerPetKind, ResourceKind, Side};
+use crate::core::state::{
+    CombatPhase, PileId, PileKind, PlayerPetKind, PowerCounter, ResourceKind, Side,
+};
 use crate::registry::DefRegistry;
 
 pub type PowerEventFn = for<'a> fn(&RuleCtx<'a>, PowerInstanceId, &Event) -> Vec<Effect>;
@@ -120,6 +124,10 @@ power_ids! {
     DIE_FOR_YOU_POWER => "DIE_FOR_YOU_POWER",
     ENERGY_NEXT_TURN_POWER => "ENERGY_NEXT_TURN_POWER",
     DRAW_NEXT_TURN_POWER => "DRAW_NEXT_TURN_POWER",
+    PANACHE_POWER => "POWER_PANACHE",
+    SPEEDSTER_POWER => "POWER_SPEEDSTER",
+    CREATIVE_AI_POWER => "POWER_CREATIVE_AI",
+    WELL_LAID_PLANS_POWER => "POWER_WELL_LAID_PLANS",
 }
 
 pub fn register_core_powers(registry: &mut DefRegistry<PowerId, PowerDef>) {
@@ -172,6 +180,10 @@ pub fn register_core_powers(registry: &mut DefRegistry<PowerId, PowerDef>) {
         die_for_you(),
         simple_event_power(ENERGY_NEXT_TURN_POWER, energy_next_turn_on_event),
         simple_event_power(DRAW_NEXT_TURN_POWER, draw_next_turn_on_event),
+        simple_event_power(PANACHE_POWER, panache_on_event),
+        simple_event_power(SPEEDSTER_POWER, speedster_on_event),
+        simple_event_power(CREATIVE_AI_POWER, creative_ai_on_event),
+        simple_event_power(WELL_LAID_PLANS_POWER, well_laid_plans_on_event),
     ] {
         registry.register(def);
     }
@@ -966,6 +978,150 @@ fn noxious_fumes_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Eve
             source: Some(Source::Power(power)),
         })
         .collect()
+}
+
+fn panache_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    match event {
+        Event::CardPlayed(event) => {
+            if ctx.state.player_creature_id() != Some(instance.owner) {
+                return Vec::new();
+            }
+            let Some(card_owner) = ctx.state.card(event.card).map(|card| card.owner) else {
+                return Vec::new();
+            };
+            if Some(card_owner) != ctx.state.player_id() {
+                return Vec::new();
+            }
+
+            let Some(mut cards_left) = instance.counter(PowerCounter::PanacheCardsLeft) else {
+                return vec![Effect::SetPowerCounter {
+                    power,
+                    counter: PowerCounter::PanacheCardsLeft,
+                    value: 5,
+                }];
+            };
+            cards_left -= 1;
+            let mut effects = Vec::new();
+            if cards_left <= 0 {
+                effects.push(Effect::DealDamageToAllEnemies(DamageAllEnemiesOp {
+                    source: Some(Source::Power(power)),
+                    dealer: Some(instance.owner),
+                    base_amount: Decimal::from(instance.amount),
+                    kind: DamageKind::Power,
+                    flags: DamageFlags {
+                        ignores_block: false,
+                    },
+                    hit_count: 1,
+                }));
+                cards_left = 5;
+            }
+            effects.push(Effect::SetPowerCounter {
+                power,
+                counter: PowerCounter::PanacheCardsLeft,
+                value: cards_left,
+            });
+            effects
+        }
+        Event::TurnEnded { side } => ctx
+            .state
+            .creature(instance.owner)
+            .filter(|owner| owner.side == *side)
+            .map(|_| {
+                vec![Effect::SetPowerCounter {
+                    power,
+                    counter: PowerCounter::PanacheCardsLeft,
+                    value: 5,
+                }]
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn speedster_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Event::CardDrawn(event) = event else {
+        return Vec::new();
+    };
+    if event.from_hand_draw || ctx.state.player_creature_id() != Some(instance.owner) {
+        return Vec::new();
+    }
+    let owner_turn = ctx
+        .state
+        .combat()
+        .map(|combat| {
+            matches!(
+                combat.phase,
+                CombatPhase::PlayerStart | CombatPhase::PlayerAction | CombatPhase::PlayerEnd
+            )
+        })
+        .unwrap_or(false);
+    if !owner_turn {
+        return Vec::new();
+    }
+    vec![Effect::DealDamageToAllEnemies(DamageAllEnemiesOp {
+        source: Some(Source::Power(power)),
+        dealer: Some(instance.owner),
+        base_amount: Decimal::from(instance.amount),
+        kind: DamageKind::Power,
+        flags: DamageFlags {
+            ignores_block: false,
+        },
+        hit_count: 1,
+    })]
+}
+
+fn creative_ai_on_event(ctx: &RuleCtx<'_>, power: PowerInstanceId, event: &Event) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    let Event::BeforeHandDraw { player } = event else {
+        return Vec::new();
+    };
+    if ctx.state.player_creature_id() != Some(instance.owner) {
+        return Vec::new();
+    }
+    (0..instance.amount.max(0))
+        .map(|_| Effect::GenerateRandomCardToHand {
+            player: *player,
+            card_type: Some(CardType::Power),
+            target: None,
+            zero_cost_this_turn: false,
+        })
+        .collect()
+}
+
+fn well_laid_plans_on_event(
+    ctx: &RuleCtx<'_>,
+    power: PowerInstanceId,
+    event: &Event,
+) -> Vec<Effect> {
+    let Some(instance) = power_instance(ctx, power) else {
+        return Vec::new();
+    };
+    if !matches!(event, Event::TurnEnded { side: Side::Player }) {
+        return Vec::new();
+    }
+    ctx.state
+        .player_id()
+        .filter(|_| ctx.state.player_creature_id() == Some(instance.owner))
+        .map(|player| {
+            vec![Effect::SelectHandCards {
+                player,
+                filter: CardFilter::NotRetainedThisTurn,
+                min: 0,
+                max: instance.amount.max(0) as usize,
+                prompt: LocKey::new("choice.retain"),
+                source: Some(Source::Power(power)),
+                on_resolve: ChoiceAction::RetainSelectedCardsThisTurn,
+            }]
+        })
+        .unwrap_or_default()
 }
 
 fn energy_next_turn_on_event(

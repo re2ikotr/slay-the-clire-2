@@ -7,8 +7,8 @@ use crate::core::ids::{
 };
 use crate::core::state::{
     decimal_to_i32_trunc, CardCosts, CardCounter, CardFlags, CardInstance, GameState, OrbInstance,
-    PileId, PileKind, PowerInstance, ResourceKind, Side, StateError, TemporaryCardCosts,
-    MAX_CARDS_IN_HAND, MAX_ORB_SLOTS,
+    PileId, PileKind, PowerCounter, PowerInstance, ResourceKind, Side, StateError,
+    TemporaryCardCosts, MAX_CARDS_IN_HAND, MAX_ORB_SLOTS,
 };
 
 impl GameState {
@@ -325,6 +325,16 @@ impl GameState {
         Ok(true)
     }
 
+    pub fn set_card_retain_this_turn(
+        &mut self,
+        card: CardInstanceId,
+        retained: bool,
+    ) -> Result<bool, StateError> {
+        let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
+        card.flags.retain_this_turn = retained;
+        Ok(retained)
+    }
+
     pub fn add_card_counter(
         &mut self,
         card: CardInstanceId,
@@ -375,6 +385,15 @@ impl GameState {
         player: PlayerId,
         def: OrbId,
     ) -> Result<OrbInstanceId, StateError> {
+        self.channel_orb_with_amount(player, def, 0)
+    }
+
+    pub fn channel_orb_with_amount(
+        &mut self,
+        player: PlayerId,
+        def: OrbId,
+        amount: i32,
+    ) -> Result<OrbInstanceId, StateError> {
         let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
         if combat.player.id != player {
             return Err(StateError::UnknownPlayer(player));
@@ -391,10 +410,21 @@ impl GameState {
                 id,
                 def,
                 owner: player,
+                amount,
             },
         );
         combat.player.orb_queue.orbs.push(id);
         Ok(id)
+    }
+
+    pub fn add_orb_amount(&mut self, orb: OrbInstanceId, amount: i32) -> Result<i32, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let instance = combat
+            .orbs
+            .get_mut(&orb)
+            .ok_or(StateError::UnknownOrb(orb))?;
+        instance.amount = instance.amount.saturating_add(amount).max(0);
+        Ok(instance.amount)
     }
 
     pub fn remove_orb(&mut self, orb: OrbInstanceId) -> Result<OrbInstance, StateError> {
@@ -535,6 +565,7 @@ impl GameState {
                 def: power,
                 owner: target,
                 amount,
+                counters: BTreeMap::new(),
             },
         );
         combat.creatures[target_index].powers.push(id);
@@ -554,6 +585,21 @@ impl GameState {
         let delta = decimal_to_i32_trunc(amount);
         instance.amount += delta;
         Ok((instance.owner, instance.def, delta))
+    }
+
+    pub fn set_power_counter(
+        &mut self,
+        power: PowerInstanceId,
+        counter: PowerCounter,
+        value: i32,
+    ) -> Result<i32, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        let instance = combat
+            .powers
+            .get_mut(&power)
+            .ok_or(StateError::UnknownPower(power))?;
+        instance.counters.insert(counter, value);
+        Ok(value)
     }
 
     pub fn remove_power(&mut self, power: PowerInstanceId) -> Result<(), StateError> {
@@ -636,6 +682,12 @@ impl GameState {
         if let Some(combat) = self.combat.as_mut() {
             combat.turn_stats.hp_lost_by_player += amount;
             combat.combat_stats.hp_loss_events_by_player += 1;
+        }
+    }
+
+    pub fn record_lightning_orb_channeled(&mut self) {
+        if let Some(combat) = self.combat.as_mut() {
+            combat.combat_stats.lightning_orbs_channeled += 1;
         }
     }
 }

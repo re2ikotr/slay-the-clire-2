@@ -130,11 +130,17 @@ pub struct CardFlags {
     pub temporary: bool,
     pub purge_on_use: bool,
     pub zero_cost_this_turn: bool,
+    pub retain_this_turn: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CardCounter {
     DamageIncrease,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PowerCounter {
+    PanacheCardsLeft,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,6 +186,13 @@ pub struct PowerInstance {
     pub def: PowerId,
     pub owner: CreatureId,
     pub amount: i32,
+    pub counters: BTreeMap<PowerCounter, i32>,
+}
+
+impl PowerInstance {
+    pub fn counter(&self, counter: PowerCounter) -> Option<i32> {
+        self.counters.get(&counter).copied()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,6 +364,7 @@ pub struct OrbInstance {
     pub id: OrbInstanceId,
     pub def: OrbId,
     pub owner: PlayerId,
+    pub amount: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -412,6 +426,7 @@ pub struct CombatTurnStats {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CombatStats {
     pub hp_loss_events_by_player: u32,
+    pub lightning_orbs_channeled: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

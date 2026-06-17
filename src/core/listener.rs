@@ -264,6 +264,7 @@ mod tests {
                 def: PowerId::new("player_power"),
                 owner: player_creature,
                 amount: 1,
+                counters: Default::default(),
             },
         );
         combat.powers.insert(
@@ -273,6 +274,7 @@ mod tests {
                 def: PowerId::new("enemy_power"),
                 owner: enemy,
                 amount: 1,
+                counters: Default::default(),
             },
         );
         combat
@@ -356,6 +358,7 @@ mod tests {
                     def: PowerId::new(def),
                     owner,
                     amount: 1,
+                    counters: Default::default(),
                 },
             );
             combat

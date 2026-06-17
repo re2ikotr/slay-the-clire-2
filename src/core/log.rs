@@ -3,7 +3,7 @@ use crate::core::engine::CombatResult;
 use crate::core::event::Event;
 use crate::core::ids::{CardInstanceId, CreatureId, OrbInstanceId, PlayerId, PowerInstanceId};
 use crate::core::query::{CardPlayResultPileModifierLog, Decision, ModifierLog};
-use crate::core::state::{CardCounter, PileId, ResourceKind, StateError};
+use crate::core::state::{CardCounter, PileId, PowerCounter, ResourceKind, StateError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogEntry {
@@ -66,6 +66,10 @@ pub enum StateChange {
     OrbChanneled {
         orb: OrbInstanceId,
     },
+    OrbAmountChanged {
+        orb: OrbInstanceId,
+        amount: i32,
+    },
     OrbEvoked {
         orb: OrbInstanceId,
         removed: bool,
@@ -76,6 +80,15 @@ pub enum StateChange {
     CardCounterChanged {
         card: CardInstanceId,
         counter: CardCounter,
+        value: i32,
+    },
+    CardRetainChanged {
+        card: CardInstanceId,
+        retained: bool,
+    },
+    PowerCounterChanged {
+        power: PowerInstanceId,
+        counter: PowerCounter,
         value: i32,
     },
     CardsShuffled {

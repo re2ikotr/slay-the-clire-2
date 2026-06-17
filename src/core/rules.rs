@@ -26,17 +26,29 @@ use crate::registry::StaticRegistry;
 pub struct RulePipeline;
 
 impl RulePipeline {
+    pub fn event_listeners(state: &GameState, event: &Event) -> Vec<ListenerRef> {
+        collect_combat_listeners(state, event_listener_scope(event))
+    }
+
+    pub fn notify_listener(
+        registry: &StaticRegistry,
+        state: &GameState,
+        listener: ListenerRef,
+        event: &Event,
+    ) -> Vec<Effect> {
+        let ctx = RuleCtx {
+            state,
+            registry,
+            listener: Some(listener),
+        };
+        dispatch_event(registry, state, listener, &ctx, event)
+    }
+
     pub fn notify(registry: &StaticRegistry, state: &GameState, event: &Event) -> Vec<Effect> {
-        let listeners = collect_combat_listeners(state, event_listener_scope(event));
         let mut out = Vec::new();
 
-        for listener in listeners {
-            let ctx = RuleCtx {
-                state,
-                registry,
-                listener: Some(listener),
-            };
-            out.extend(dispatch_event(registry, state, listener, &ctx, event));
+        for listener in Self::event_listeners(state, event) {
+            out.extend(Self::notify_listener(registry, state, listener, event));
         }
 
         out
@@ -977,6 +989,7 @@ fn event_listener_scope(event: &Event) -> ListenerScope {
         Event::CombatStarted
         | Event::TurnStarted { .. }
         | Event::TurnEnded { .. }
+        | Event::BeforeHandDraw { .. }
         | Event::CardsShuffled(_)
         | Event::CardDrawn(_)
         | Event::CardDiscarded(_)

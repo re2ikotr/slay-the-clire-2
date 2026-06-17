@@ -6,7 +6,9 @@ use crate::core::ids::{
     CardId, CardInstanceId, ChoiceId, CreatureId, LocKey, OrbId, OrbInstanceId, PlayerId,
     PotionInstanceId, PowerId, PowerInstanceId, RelicInstanceId,
 };
-use crate::core::state::{CardCounter, CombatPhase, PileId, ResourceKind, Side};
+use crate::core::state::{
+    CardCounter, CombatPhase, PileId, PileKind, PowerCounter, ResourceKind, Side,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -81,6 +83,12 @@ pub enum Effect {
         amount: Decimal,
         source: Option<Source>,
     },
+    ApplyPowerToRandomEnemy {
+        power: PowerId,
+        amount: Decimal,
+        source: Option<Source>,
+        count: u8,
+    },
     AddPowerAmount {
         power: PowerInstanceId,
         amount: Decimal,
@@ -132,10 +140,18 @@ pub enum Effect {
         player: PlayerId,
         mode: UpgradeMode,
     },
+    RetainCardsThisTurn {
+        cards: Vec<CardInstanceId>,
+    },
     AddCardCounter {
         card: CardInstanceId,
         counter: CardCounter,
         amount: i32,
+    },
+    SetPowerCounter {
+        power: PowerInstanceId,
+        counter: PowerCounter,
+        value: i32,
     },
     AddGeneratedCard {
         player: PlayerId,
@@ -151,8 +167,20 @@ pub enum Effect {
         target: Option<TargetType>,
         zero_cost_this_turn: bool,
     },
+    DiscoverRandomCardsToHand {
+        player: PlayerId,
+        count: u8,
+        zero_cost_this_turn: bool,
+    },
     PlayTopDrawCards {
         player: PlayerId,
+        count: u8,
+        exhaust_after_play: bool,
+    },
+    PlayRandomCardsFromPile {
+        player: PlayerId,
+        pile: PileKind,
+        filter: CardFilter,
         count: u8,
         exhaust_after_play: bool,
     },
@@ -169,6 +197,10 @@ pub enum Effect {
         orb: OrbId,
         source: Option<Source>,
     },
+    ChannelRandomOrb {
+        player: PlayerId,
+        source: Option<Source>,
+    },
     EvokeOrb {
         player: PlayerId,
         target: OrbSelection,
@@ -179,6 +211,10 @@ pub enum Effect {
         orb: OrbInstanceId,
         trigger: OrbTrigger,
         target: Option<CreatureId>,
+    },
+    AddOrbAmount {
+        orb: OrbInstanceId,
+        amount: i32,
     },
     SummonOsty {
         player: PlayerId,
@@ -198,6 +234,16 @@ pub enum Effect {
     },
     SelectHandCards {
         player: PlayerId,
+        filter: CardFilter,
+        min: usize,
+        max: usize,
+        prompt: LocKey,
+        source: Option<Source>,
+        on_resolve: ChoiceAction,
+    },
+    SelectPileCards {
+        player: PlayerId,
+        pile: PileKind,
         filter: CardFilter,
         min: usize,
         max: usize,
@@ -314,6 +360,7 @@ pub enum CardFilter {
     Any,
     Attack,
     NonAttack,
+    NotRetainedThisTurn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,6 +401,7 @@ pub struct ChoiceOption {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoiceValue {
     Card(CardInstanceId),
+    CardDef(CardId),
     Target(CreatureId),
     None,
 }
@@ -368,6 +416,16 @@ pub enum ChoiceAction {
         def: CardId,
         count: u8,
         upgraded: bool,
+    },
+    MoveSelectedCardsToPile {
+        pile: PileKind,
+        reason: MoveReason,
+    },
+    RetainSelectedCardsThisTurn,
+    AddSelectedCardDefsToHand {
+        upgraded: bool,
+        temporary: bool,
+        zero_cost_this_turn: bool,
     },
 }
 

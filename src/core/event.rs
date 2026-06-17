@@ -9,6 +9,7 @@ pub enum Event {
     CombatStarted,
     TurnStarted { side: Side },
     TurnEnded { side: Side },
+    BeforeHandDraw { player: PlayerId },
     CardsShuffled(CardsShuffled),
     CardDrawn(CardDrawn),
     CardDiscarded(CardDiscarded),
