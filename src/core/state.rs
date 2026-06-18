@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use rust_decimal::Decimal;
 
+use crate::content::cards::CardKeyword;
 use crate::core::ids::{
     CardId, CardInstanceId, CombatId, CreatureId, ModifierInstanceId, MonsterId, OrbId,
     OrbInstanceId, PlayerId, PotionId, PotionInstanceId, PowerId, PowerInstanceId, RelicId,
@@ -133,6 +134,52 @@ pub struct CardFlags {
     pub retain_this_turn: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardKeywordDuration {
+    Persistent,
+    ThisTurn,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CardKeywordState {
+    pub added: BTreeSet<CardKeyword>,
+    pub removed: BTreeSet<CardKeyword>,
+    pub added_this_turn: BTreeSet<CardKeyword>,
+}
+
+impl CardKeywordState {
+    pub fn is_active(&self, base: bool, keyword: CardKeyword) -> bool {
+        self.added_this_turn.contains(&keyword)
+            || ((base || self.added.contains(&keyword)) && !self.removed.contains(&keyword))
+    }
+
+    pub fn add(&mut self, keyword: CardKeyword, duration: CardKeywordDuration) -> bool {
+        match duration {
+            CardKeywordDuration::Persistent => {
+                self.removed.remove(&keyword);
+                self.added.insert(keyword)
+            }
+            CardKeywordDuration::ThisTurn => self.added_this_turn.insert(keyword),
+        }
+    }
+
+    pub fn remove(&mut self, keyword: CardKeyword) -> bool {
+        let mut changed = self.added.remove(&keyword);
+        changed |= self.removed.insert(keyword);
+        changed
+    }
+
+    pub fn remove_this_turn(&mut self, keyword: CardKeyword) -> bool {
+        self.added_this_turn.remove(&keyword)
+    }
+
+    pub fn clear_turn_limited(&mut self) -> Vec<CardKeyword> {
+        let cleared = self.added_this_turn.iter().copied().collect::<Vec<_>>();
+        self.added_this_turn.clear();
+        cleared
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CardCounter {
     DamageIncrease,
@@ -153,6 +200,7 @@ pub struct CardInstance {
     pub temp_costs: TemporaryCardCosts,
     pub pile: PileId,
     pub flags: CardFlags,
+    pub keyword_state: CardKeywordState,
     pub counters: BTreeMap<CardCounter, i32>,
 }
 
@@ -172,11 +220,13 @@ impl CardInstance {
         self.counters.get(&counter).copied().unwrap_or(0)
     }
 
-    pub(crate) fn clear_turn_limited_state(&mut self) {
+    pub(crate) fn clear_turn_limited_state(&mut self) -> Vec<CardKeyword> {
         if self.flags.zero_cost_this_turn {
             self.temp_costs.energy = None;
             self.flags.zero_cost_this_turn = false;
         }
+        self.flags.retain_this_turn = false;
+        self.keyword_state.clear_turn_limited()
     }
 }
 

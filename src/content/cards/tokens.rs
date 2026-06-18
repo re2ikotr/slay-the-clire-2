@@ -28,7 +28,7 @@ use crate::registry::DefRegistry;
 // they do for ironclad. They're declared in `generated_cards.rs` because the
 // catalog still references them; we just refer to those constants here.
 use crate::content::generated_cards::{
-    DISINTEGRATION, FUEL, LUMINESCE, MINION_DIVE_BOMB, MINION_SACRIFICE, MINION_STRIKE, MIND_ROT,
+    DISINTEGRATION, FUEL, LUMINESCE, MIND_ROT, MINION_DIVE_BOMB, MINION_SACRIFICE, MINION_STRIKE,
     SHIV, SLOTH, SOUL, SOVEREIGN_BLADE, SWEEPING_GAZE, WASTE_AWAY,
 };
 
@@ -109,26 +109,181 @@ macro_rules! token {
 
 const TOKEN_CARD_SPECS: &[TokenSpec] = &[
     // ---- Playable tokens ----
-    token!(FUEL, Skill, Token, SelfTarget, CardCosts::energy(0), None, KW_EXHAUST, KW_NONE, TAG_NONE, true, fuel_play),
-    token!(LUMINESCE, Skill, Token, SelfTarget, CardCosts::energy(0), None, KW_EXHAUST_RETAIN, KW_NONE, TAG_NONE, true, luminesce_play),
-    token!(MINION_DIVE_BOMB, Attack, Token, Enemy, CardCosts::energy(0), None, KW_EXHAUST, KW_NONE, TAG_MINION, true, minion_dive_bomb_play),
-    token!(MINION_SACRIFICE, Skill, Token, SelfTarget, CardCosts::energy(0), None, KW_EXHAUST, KW_NONE, TAG_MINION, true, minion_sacrifice_play),
-    token!(MINION_STRIKE, Attack, Token, Enemy, CardCosts::energy(0), None, KW_EXHAUST, KW_NONE, TAG_STRIKE_MINION, true, minion_strike_play),
-    token!(SHIV, Attack, Token, Enemy, CardCosts::energy(0), None, KW_EXHAUST, KW_NONE, TAG_SHIV, true, shiv_play),
-    token!(SOUL, Skill, Token, SelfTarget, CardCosts::energy(0), None, KW_EXHAUST, KW_NONE, TAG_NONE, true, soul_play),
-    token!(SOVEREIGN_BLADE, Attack, Token, Enemy, CardCosts::energy(2), Some(CardCosts::energy(1)), KW_RETAIN, KW_NONE, TAG_NONE, true, sovereign_blade_play),
-    token!(SWEEPING_GAZE, Attack, Token, RandomEnemy, CardCosts::energy(0), None, KW_EXHAUST_ETHEREAL, KW_NONE, TAG_OSTYATTACK, true, sweeping_gaze_play),
-
+    token!(
+        FUEL,
+        Skill,
+        Token,
+        SelfTarget,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST,
+        KW_NONE,
+        TAG_NONE,
+        true,
+        fuel_play
+    ),
+    token!(
+        LUMINESCE,
+        Skill,
+        Token,
+        SelfTarget,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST_RETAIN,
+        KW_NONE,
+        TAG_NONE,
+        true,
+        luminesce_play
+    ),
+    token!(
+        MINION_DIVE_BOMB,
+        Attack,
+        Token,
+        Enemy,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST,
+        KW_NONE,
+        TAG_MINION,
+        true,
+        minion_dive_bomb_play
+    ),
+    token!(
+        MINION_SACRIFICE,
+        Skill,
+        Token,
+        SelfTarget,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST,
+        KW_NONE,
+        TAG_MINION,
+        true,
+        minion_sacrifice_play
+    ),
+    token!(
+        MINION_STRIKE,
+        Attack,
+        Token,
+        Enemy,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST,
+        KW_NONE,
+        TAG_STRIKE_MINION,
+        true,
+        minion_strike_play
+    ),
+    token!(
+        SHIV,
+        Attack,
+        Token,
+        Enemy,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST,
+        KW_NONE,
+        TAG_SHIV,
+        true,
+        shiv_play
+    ),
+    token!(
+        SOUL,
+        Skill,
+        Token,
+        SelfTarget,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST,
+        KW_NONE,
+        TAG_NONE,
+        true,
+        soul_play
+    ),
+    token!(
+        SOVEREIGN_BLADE,
+        Attack,
+        Token,
+        Enemy,
+        CardCosts::energy(2),
+        Some(CardCosts::energy(1)),
+        KW_RETAIN,
+        KW_NONE,
+        TAG_NONE,
+        true,
+        sovereign_blade_play
+    ),
+    token!(
+        SWEEPING_GAZE,
+        Attack,
+        Token,
+        RandomEnemy,
+        CardCosts::energy(0),
+        None,
+        KW_EXHAUST_ETHEREAL,
+        KW_NONE,
+        TAG_OSTYATTACK,
+        true,
+        sweeping_gaze_play
+    ),
     // ---- Status tokens ----
     //
     // Unplayable status cards added to the player's hand by enemy effects.
     // The runtime impact is implemented by powers/listeners outside this
     // file; we register them so card-pool lookups, draws, and discard piles
     // work.
-    token!(DISINTEGRATION, Status, Status, None, UNPLAYABLE_COSTS, None, KW_NONE, KW_NONE, TAG_NONE, false, no_play),
-    token!(MIND_ROT,       Status, Status, None, UNPLAYABLE_COSTS, None, KW_NONE, KW_NONE, TAG_NONE, false, no_play),
-    token!(SLOTH,          Status, Status, None, UNPLAYABLE_COSTS, None, KW_NONE, KW_NONE, TAG_NONE, false, no_play),
-    token!(WASTE_AWAY,     Status, Status, None, UNPLAYABLE_COSTS, None, KW_NONE, KW_NONE, TAG_NONE, false, no_play),
+    token!(
+        DISINTEGRATION,
+        Status,
+        Status,
+        None,
+        UNPLAYABLE_COSTS,
+        None,
+        KW_NONE,
+        KW_NONE,
+        TAG_NONE,
+        false,
+        no_play
+    ),
+    token!(
+        MIND_ROT,
+        Status,
+        Status,
+        None,
+        UNPLAYABLE_COSTS,
+        None,
+        KW_NONE,
+        KW_NONE,
+        TAG_NONE,
+        false,
+        no_play
+    ),
+    token!(
+        SLOTH,
+        Status,
+        Status,
+        None,
+        UNPLAYABLE_COSTS,
+        None,
+        KW_NONE,
+        KW_NONE,
+        TAG_NONE,
+        false,
+        no_play
+    ),
+    token!(
+        WASTE_AWAY,
+        Status,
+        Status,
+        None,
+        UNPLAYABLE_COSTS,
+        None,
+        KW_NONE,
+        KW_NONE,
+        TAG_NONE,
+        false,
+        no_play
+    ),
 ];
 
 const UNPLAYABLE_COSTS: CardCosts = CardCosts {
@@ -326,6 +481,9 @@ mod tests {
     fn sloth_carries_decide_rule() {
         let registry = StaticRegistry::standard();
         let sloth = registry.cards.get(SLOTH).unwrap();
-        assert!(sloth.rules.decide.is_some(), "SLOTH must keep its play-prevention rule");
+        assert!(
+            sloth.rules.decide.is_some(),
+            "SLOTH must keep its play-prevention rule"
+        );
     }
 }

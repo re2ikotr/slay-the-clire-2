@@ -148,7 +148,7 @@ pub enum TargetType {
     Osty,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CardKeyword {
     Exhaust,
     Innate,
@@ -160,6 +160,21 @@ pub enum CardKeyword {
     Retain,
     Sly,
     Eternal,
+}
+
+impl CardKeyword {
+    pub const ALL: &'static [Self] = &[
+        Self::Exhaust,
+        Self::Innate,
+        Self::Unplayable,
+        Self::Ethereal,
+        Self::Temporary,
+        Self::PurgeOnUse,
+        Self::FreeThisTurn,
+        Self::Retain,
+        Self::Sly,
+        Self::Eternal,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

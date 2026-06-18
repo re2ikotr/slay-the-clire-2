@@ -46,6 +46,7 @@ pub(crate) fn build_single_player_combat(
                 temp_costs: TemporaryCardCosts::default(),
                 pile: draw,
                 flags: CardFlags::default(),
+                keyword_state: Default::default(),
                 counters: BTreeMap::new(),
             },
         );
@@ -156,6 +157,7 @@ impl GameState {
                 temp_costs: TemporaryCardCosts::default(),
                 pile: hand,
                 flags: CardFlags::default(),
+                keyword_state: Default::default(),
                 counters: BTreeMap::new(),
             },
         );
@@ -217,6 +219,7 @@ impl GameState {
                 temp_costs: TemporaryCardCosts::default(),
                 pile: hand,
                 flags: CardFlags::default(),
+                keyword_state: Default::default(),
                 counters: BTreeMap::new(),
             },
         );
@@ -231,6 +234,7 @@ impl GameState {
                 temp_costs: TemporaryCardCosts::default(),
                 pile: hand,
                 flags: CardFlags::default(),
+                keyword_state: Default::default(),
                 counters: BTreeMap::new(),
             },
         );
@@ -306,6 +310,7 @@ impl GameState {
                     temp_costs: TemporaryCardCosts::default(),
                     pile: draw,
                     flags: CardFlags::default(),
+                    keyword_state: Default::default(),
                     counters: BTreeMap::new(),
                 },
             );

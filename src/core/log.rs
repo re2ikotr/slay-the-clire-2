@@ -1,9 +1,12 @@
+use crate::content::cards::CardKeyword;
 use crate::core::effect::{DamageResult, Effect, MoveReason};
 use crate::core::engine::CombatResult;
 use crate::core::event::Event;
 use crate::core::ids::{CardInstanceId, CreatureId, OrbInstanceId, PlayerId, PowerInstanceId};
 use crate::core::query::{CardPlayResultPileModifierLog, Decision, ModifierLog};
-use crate::core::state::{CardCounter, PileId, PowerCounter, ResourceKind, StateError};
+use crate::core::state::{
+    CardCounter, CardKeywordDuration, PileId, PowerCounter, ResourceKind, StateError,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogEntry {
@@ -85,6 +88,12 @@ pub enum StateChange {
     CardRetainChanged {
         card: CardInstanceId,
         retained: bool,
+    },
+    CardKeywordChanged {
+        card: CardInstanceId,
+        keyword: CardKeyword,
+        added: bool,
+        duration: CardKeywordDuration,
     },
     PowerCounterChanged {
         power: PowerInstanceId,

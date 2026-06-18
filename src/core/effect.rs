@@ -7,7 +7,8 @@ use crate::core::ids::{
     PotionInstanceId, PowerId, PowerInstanceId, RelicInstanceId,
 };
 use crate::core::state::{
-    CardCounter, CombatPhase, PileId, PileKind, PowerCounter, ResourceKind, Side,
+    CardCounter, CardKeywordDuration, CombatPhase, PileId, PileKind, PowerCounter, ResourceKind,
+    Side,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +37,13 @@ pub enum Effect {
         player: PlayerId,
         card: CardInstanceId,
         target: Option<CreatureId>,
+    },
+    AutoPlayCard {
+        player: PlayerId,
+        card: CardInstanceId,
+        target: Option<CreatureId>,
+        force_exhaust: bool,
+        reason: AutoPlayReason,
     },
     PrepareCardPlayResult {
         player: PlayerId,
@@ -142,6 +150,20 @@ pub enum Effect {
     },
     RetainCardsThisTurn {
         cards: Vec<CardInstanceId>,
+    },
+    AddCardKeyword {
+        card: CardInstanceId,
+        keyword: crate::content::cards::CardKeyword,
+        duration: CardKeywordDuration,
+        source: Option<Source>,
+    },
+    RemoveCardKeyword {
+        card: CardInstanceId,
+        keyword: crate::content::cards::CardKeyword,
+        source: Option<Source>,
+    },
+    ClearCardTurnState {
+        player: PlayerId,
     },
     AddCardCounter {
         card: CardInstanceId,
@@ -271,6 +293,12 @@ pub enum Source {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoPlayReason {
+    SlyDiscard,
+    Effect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiscardKind {
     Manual,
     EndOfTurn,
@@ -360,6 +388,7 @@ pub enum CardFilter {
     Any,
     Attack,
     NonAttack,
+    SkillWithoutKeyword(crate::content::cards::CardKeyword),
     NotRetainedThisTurn,
 }
 
@@ -422,6 +451,10 @@ pub enum ChoiceAction {
         reason: MoveReason,
     },
     RetainSelectedCardsThisTurn,
+    AddSelectedCardKeyword {
+        keyword: crate::content::cards::CardKeyword,
+        duration: CardKeywordDuration,
+    },
     AddSelectedCardDefsToHand {
         upgraded: bool,
         temporary: bool,

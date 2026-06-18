@@ -5,9 +5,9 @@ use rust_decimal::Decimal;
 use crate::content::cards::{CardKeyword, CardPlayCtx, CardType, TargetType};
 use crate::core::command::CommandError;
 use crate::core::effect::{
-    CardFilter, ChoiceAction, ChoiceKind, ChoiceOption, ChoiceResolution, ChoiceResponse,
-    ChoiceValue, DamageOp, DamageResult, DiscardKind, Effect, MoveReason, OrbSelection, OrbTrigger,
-    Source, UpgradeMode,
+    AutoPlayReason, CardFilter, ChoiceAction, ChoiceKind, ChoiceOption, ChoiceResolution,
+    ChoiceResponse, ChoiceValue, DamageOp, DamageResult, DiscardKind, Effect, MoveReason,
+    OrbSelection, OrbTrigger, Source, UpgradeMode,
 };
 use crate::core::engine::{combat_result_for_state, StepResult};
 use crate::core::event::{
@@ -27,8 +27,8 @@ use crate::core::query::{
 };
 use crate::core::rules::{RuleCtx, RulePipeline};
 use crate::core::state::{
-    decimal_to_i32_trunc, CardCost, CombatPhase, GameState, PileId, PileKind, PlayerPetKind,
-    ResourceKind, Side, StateError, BASE_HAND_DRAW_COUNT,
+    decimal_to_i32_trunc, CardCost, CardKeywordDuration, CombatPhase, GameState, PileId, PileKind,
+    PlayerPetKind, ResourceKind, Side, StateError, BASE_HAND_DRAW_COUNT,
 };
 use crate::registry::StaticRegistry;
 
@@ -278,6 +278,13 @@ impl EffectResolver {
                     .unwrap_or_default();
                 self.apply_immediate_effects(state, registry, effects)
             }
+            Effect::AutoPlayCard {
+                player,
+                card,
+                target,
+                force_exhaust,
+                reason: _,
+            } => self.auto_play_card(state, registry, player, card, target, force_exhaust),
             Effect::PrepareCardPlayResult {
                 player,
                 card,
@@ -706,18 +713,90 @@ impl EffectResolver {
             }
             Effect::RetainCardsThisTurn { cards } => {
                 for card in cards {
-                    match state.set_card_retain_this_turn(card, true) {
-                        Ok(retained) => {
-                            self.log
-                                .push(LogEntry::StateChanged(StateChange::CardRetainChanged {
-                                    card,
-                                    retained,
-                                }));
+                    match state.add_card_keyword(
+                        card,
+                        CardKeyword::Retain,
+                        CardKeywordDuration::ThisTurn,
+                    ) {
+                        Ok(changed) => {
+                            if changed {
+                                self.log.push(LogEntry::StateChanged(
+                                    StateChange::CardKeywordChanged {
+                                        card,
+                                        keyword: CardKeyword::Retain,
+                                        added: true,
+                                        duration: CardKeywordDuration::ThisTurn,
+                                    },
+                                ));
+                            }
                         }
                         Err(error) => return ApplyResult::StateError(error),
                     }
                 }
                 ApplyResult::Continue(Vec::new())
+            }
+            Effect::AddCardKeyword {
+                card,
+                keyword,
+                duration,
+                source: _,
+            } => match state.add_card_keyword(card, keyword, duration) {
+                Ok(changed) => {
+                    if changed {
+                        self.log
+                            .push(LogEntry::StateChanged(StateChange::CardKeywordChanged {
+                                card,
+                                keyword,
+                                added: true,
+                                duration,
+                            }));
+                    }
+                    ApplyResult::Continue(Vec::new())
+                }
+                Err(error) => ApplyResult::StateError(error),
+            },
+            Effect::RemoveCardKeyword {
+                card,
+                keyword,
+                source: _,
+            } => {
+                let was_active = card_has_keyword(state, registry, card, keyword);
+                match state.remove_card_keyword(card, keyword) {
+                    Ok(_) => {
+                        if was_active {
+                            self.log.push(LogEntry::StateChanged(
+                                StateChange::CardKeywordChanged {
+                                    card,
+                                    keyword,
+                                    added: false,
+                                    duration: CardKeywordDuration::Persistent,
+                                },
+                            ));
+                        }
+                        ApplyResult::Continue(Vec::new())
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
+            }
+            Effect::ClearCardTurnState { player } => {
+                match state.clear_player_card_turn_state(player) {
+                    Ok(cleared) => {
+                        for (card, keywords) in cleared {
+                            for keyword in keywords {
+                                self.log.push(LogEntry::StateChanged(
+                                    StateChange::CardKeywordChanged {
+                                        card,
+                                        keyword,
+                                        added: false,
+                                        duration: CardKeywordDuration::ThisTurn,
+                                    },
+                                ));
+                            }
+                        }
+                        ApplyResult::Continue(Vec::new())
+                    }
+                    Err(error) => ApplyResult::StateError(error),
+                }
             }
             Effect::AddCardCounter {
                 card,
@@ -1189,23 +1268,6 @@ impl EffectResolver {
             if card_has_keyword(state, registry, card, CardKeyword::Retain) {
                 continue;
             }
-            if state
-                .card(card)
-                .map(|card| card.flags.retain_this_turn)
-                .unwrap_or(false)
-            {
-                match state.set_card_retain_this_turn(card, false) {
-                    Ok(retained) => {
-                        self.log
-                            .push(LogEntry::StateChanged(StateChange::CardRetainChanged {
-                                card,
-                                retained,
-                            }));
-                    }
-                    Err(error) => return ApplyResult::StateError(error),
-                }
-                continue;
-            }
             if card_has_keyword(state, registry, card, CardKeyword::Ethereal) {
                 effects.push(Effect::ExhaustCard { card });
             } else {
@@ -1249,9 +1311,15 @@ impl EffectResolver {
         then_draw: u8,
     ) -> ApplyResult {
         let mut effects = Vec::new();
+        let mut sly_cards = Vec::new();
         for card in cards {
             if !state.card_is_in_pile(card, PileKind::Hand) {
                 continue;
+            }
+            if kind == DiscardKind::Manual
+                && card_has_keyword(state, registry, card, CardKeyword::Sly)
+            {
+                sly_cards.push(card);
             }
             match state.move_card(card, PileId::player(player, PileKind::Discard)) {
                 Ok(from_kind) => {
@@ -1278,6 +1346,15 @@ impl EffectResolver {
             effects.push(Effect::DrawCards {
                 player,
                 count: then_draw,
+            });
+        }
+        for card in sly_cards {
+            effects.push(Effect::AutoPlayCard {
+                player,
+                card,
+                target: None,
+                force_exhaust: false,
+                reason: AutoPlayReason::SlyDiscard,
             });
         }
         self.apply_immediate_effects(state, registry, effects)
@@ -1982,8 +2059,7 @@ impl EffectResolver {
             .unwrap_or_default();
 
         for card in cards {
-            let effects = auto_play_card_effects(state, registry, player, card, exhaust_after_play);
-            match self.apply_immediate_effects(state, registry, effects) {
+            match self.auto_play_card(state, registry, player, card, None, exhaust_after_play) {
                 ApplyResult::Continue(_) => {}
                 other => return other,
             }
@@ -2006,8 +2082,7 @@ impl EffectResolver {
         cards.truncate(count as usize);
 
         for card in cards {
-            let effects = auto_play_card_effects(state, registry, player, card, exhaust_after_play);
-            match self.apply_immediate_effects(state, registry, effects) {
+            match self.auto_play_card(state, registry, player, card, None, exhaust_after_play) {
                 ApplyResult::Continue(_) => {}
                 other => return other,
             }
@@ -2016,6 +2091,90 @@ impl EffectResolver {
             }
         }
         ApplyResult::Continue(Vec::new())
+    }
+
+    fn auto_play_card(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        card: CardInstanceId,
+        target: Option<CreatureId>,
+        force_exhaust: bool,
+    ) -> ApplyResult {
+        if !state
+            .combat()
+            .map(|combat| combat.cards.contains_key(&card))
+            .unwrap_or(false)
+        {
+            return ApplyResult::Continue(Vec::new());
+        }
+
+        let target = target.or_else(|| auto_play_target(state, registry, card));
+        if card_has_keyword(state, registry, card, CardKeyword::Unplayable)
+            || validate_card_target(state, registry, card, target).is_err()
+        {
+            return self.move_card_to_result_without_playing(
+                state,
+                registry,
+                player,
+                card,
+                force_exhaust,
+            );
+        }
+
+        let decision = RulePipeline::should_play(registry, state, card, target);
+        self.log.push(LogEntry::DecisionMade(decision.clone()));
+        if !decision.is_allowed() {
+            return self.move_card_to_result_without_playing(
+                state,
+                registry,
+                player,
+                card,
+                force_exhaust,
+            );
+        }
+
+        self.apply_immediate_effects(
+            state,
+            registry,
+            auto_play_card_effects(player, card, target, force_exhaust),
+        )
+    }
+
+    fn move_card_to_result_without_playing(
+        &mut self,
+        state: &mut GameState,
+        registry: &StaticRegistry,
+        player: PlayerId,
+        card: CardInstanceId,
+        force_exhaust: bool,
+    ) -> ApplyResult {
+        let (pile, reason, modifiers) =
+            match resolve_card_play_result_pile(state, registry, player, card, force_exhaust) {
+                Ok(result) => result,
+                Err(error) => return ApplyResult::StateError(error),
+            };
+        self.log.extend(
+            modifiers
+                .into_iter()
+                .map(LogEntry::CardPlayResultPileModified),
+        );
+
+        let mut effects = vec![Effect::MoveCard {
+            card,
+            to: PileId::player(player, PileKind::Play),
+            reason: MoveReason::Play,
+        }];
+        match reason {
+            MoveReason::Exhaust => effects.push(Effect::ExhaustCard { card }),
+            _ => effects.push(Effect::MoveCard {
+                card,
+                to: pile,
+                reason,
+            }),
+        }
+        self.apply_immediate_effects(state, registry, effects)
     }
 
     fn discover_random_cards_to_hand(
@@ -2292,12 +2451,16 @@ fn card_matches_filter(
             .and_then(|card| registry.cards.get(card.def))
             .map(|def| def.card_type != CardType::Attack)
             .unwrap_or(false),
-        CardFilter::NotRetainedThisTurn => {
+        CardFilter::SkillWithoutKeyword(keyword) => {
             state
                 .card(card)
-                .map(|card| !card.flags.retain_this_turn)
+                .and_then(|card| registry.cards.get(card.def))
+                .map(|def| def.card_type == CardType::Skill)
                 .unwrap_or(false)
-                && !card_has_keyword(state, registry, card, CardKeyword::Retain)
+                && !card_has_keyword(state, registry, card, keyword)
+        }
+        CardFilter::NotRetainedThisTurn => {
+            !card_has_keyword(state, registry, card, CardKeyword::Retain)
         }
     }
 }
@@ -2322,13 +2485,11 @@ fn random_card_candidates(
 }
 
 fn auto_play_card_effects(
-    state: &mut GameState,
-    registry: &StaticRegistry,
     player: PlayerId,
     card: CardInstanceId,
+    target: Option<CreatureId>,
     exhaust_after_play: bool,
 ) -> Vec<Effect> {
-    let target = auto_play_target(state, registry, card);
     let play = PileId::player(player, PileKind::Play);
     vec![
         Effect::MoveCard {
@@ -2456,6 +2617,15 @@ fn choice_action_effects(
         ChoiceAction::RetainSelectedCardsThisTurn => {
             vec![Effect::RetainCardsThisTurn { cards }]
         }
+        ChoiceAction::AddSelectedCardKeyword { keyword, duration } => cards
+            .into_iter()
+            .map(|card| Effect::AddCardKeyword {
+                card,
+                keyword,
+                duration,
+                source: None,
+            })
+            .collect(),
         ChoiceAction::AddSelectedCardDefsToHand {
             upgraded,
             temporary,
@@ -2571,16 +2741,7 @@ fn card_has_keyword(
     card: CardInstanceId,
     keyword: CardKeyword,
 ) -> bool {
-    state
-        .card(card)
-        .and_then(|card_state| {
-            registry
-                .cards
-                .get(card_state.def)
-                .map(|def| (card_state, def))
-        })
-        .map(|(card_state, def)| def.has_keyword(card_state.upgraded, keyword))
-        .unwrap_or(false)
+    state.card_has_keyword(registry, card, keyword)
 }
 
 fn resolve_card_play_result_pile(
@@ -2613,9 +2774,11 @@ fn base_card_play_result_pile(
     let Some(def) = registry.cards.get(card_state.def) else {
         return Ok(PileId::player(player, PileKind::Discard));
     };
-    if def.card_type == CardType::Power || card_state.flags.purge_on_use {
+    if def.card_type == CardType::Power
+        || card_has_keyword(state, registry, card, CardKeyword::PurgeOnUse)
+    {
         Ok(PileId::player(player, PileKind::Removed))
-    } else if force_exhaust || def.has_keyword(card_state.upgraded, CardKeyword::Exhaust) {
+    } else if force_exhaust || card_has_keyword(state, registry, card, CardKeyword::Exhaust) {
         Ok(PileId::player(player, PileKind::Exhaust))
     } else {
         Ok(PileId::player(player, PileKind::Discard))
@@ -2774,6 +2937,7 @@ fn end_turn_effects(state: &GameState, side: Side) -> Vec<Effect> {
                         player,
                         kind: DiscardKind::EndOfTurn,
                     },
+                    Effect::ClearCardTurnState { player },
                     Effect::CheckCombatEnd,
                     Effect::StartTurn(Side::Monsters),
                 ]);
@@ -2822,7 +2986,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use crate::content::cards::{
-        CardDef, CardPlayCtx, CardPoolId, CardRarity, CardRules, CardType, TargetType,
+        CardDef, CardKeyword, CardPlayCtx, CardPoolId, CardRarity, CardRules, CardType, TargetType,
     };
     use crate::content::orbs::{OrbDef, OrbRules};
     use crate::content::powers::{PowerDef, PowerRules, CALAMITY_POWER, DOOM_POWER, POISON_POWER};
@@ -2845,8 +3009,8 @@ mod tests {
     };
     use crate::core::rules::{prevent_by_current_listener, RuleCtx};
     use crate::core::state::{
-        CardCost, CardCosts, CombatSetupCard, CombatSetupMonster, GameState, PileKind,
-        PlayerPetKind, RelicInstance, ResourceKind,
+        CardCost, CardCosts, CardKeywordDuration, CombatSetupCard, CombatSetupMonster, GameState,
+        PileId, PileKind, PlayerPetKind, RelicInstance, ResourceKind,
     };
     use crate::core::Command;
     use crate::registry::StaticRegistry;
@@ -2861,6 +3025,8 @@ mod tests {
     const TEST_OBSERVE_ON_CARD_PLAY: PowerId = PowerId::new("test_observe_on_card_play");
     const TEST_RELIC: RelicId = RelicId::new("test_relic");
     const TEST_ORB: OrbId = OrbId::new("test_orb");
+    const TEST_SLY_SKILL: CardId = CardId::new("test_sly_skill");
+    const TEST_BLANK_SKILL: CardId = CardId::new("test_blank_skill");
 
     fn test_strike_body(
         ctx: &CardPlayCtx<'_>,
@@ -2900,6 +3066,247 @@ mod tests {
             play: test_strike_body,
             rules: CardRules::default(),
         }
+    }
+
+    fn test_gain_energy_body(
+        ctx: &CardPlayCtx<'_>,
+        card: CardInstanceId,
+        _: Option<CreatureId>,
+    ) -> Vec<Effect> {
+        ctx.state
+            .card(card)
+            .map(|card_state| {
+                vec![Effect::GainResource {
+                    player: card_state.owner,
+                    resource: ResourceKind::Energy,
+                    amount: 1,
+                }]
+            })
+            .unwrap_or_default()
+    }
+
+    fn test_no_effect_body(
+        _: &CardPlayCtx<'_>,
+        _: CardInstanceId,
+        _: Option<CreatureId>,
+    ) -> Vec<Effect> {
+        Vec::new()
+    }
+
+    fn test_skill_def(id: CardId, play: crate::content::cards::CardPlayFn) -> CardDef {
+        CardDef {
+            id,
+            loc_key: LocKey::new("card.test_skill"),
+            pool: CardPoolId::Silent,
+            card_type: CardType::Skill,
+            rarity: CardRarity::Common,
+            target: TargetType::SelfTarget,
+            base_costs: CardCosts::energy(3),
+            upgraded_costs: None,
+            keywords: &[],
+            upgraded_keywords: &[],
+            tags: &[],
+            can_generate_in_combat: true,
+            play,
+            rules: CardRules::default(),
+        }
+    }
+
+    #[test]
+    fn runtime_card_keywords_support_persistent_and_turn_limited_state() {
+        let mut registry = StaticRegistry::empty();
+        registry
+            .cards
+            .register(test_skill_def(TEST_BLANK_SKILL, test_no_effect_body));
+        let mut state = GameState::single_player_test_combat(
+            301,
+            [CombatSetupCard {
+                def: TEST_BLANK_SKILL,
+                upgraded: false,
+                costs: CardCosts::energy(3),
+            }],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 30,
+            }],
+            80,
+            3,
+            1,
+        );
+        let player = state.player_id().unwrap();
+        let card = state.combat().unwrap().player.piles.hand[0];
+        let mut resolver = EffectResolver::default();
+
+        resolver.enqueue(Effect::AddCardKeyword {
+            card,
+            keyword: CardKeyword::Sly,
+            duration: CardKeywordDuration::Persistent,
+            source: None,
+        });
+        let StepResult::Done(log) = resolver.drain(&mut state, &registry) else {
+            panic!("expected persistent keyword add to finish");
+        };
+        assert!(state.card_has_keyword(&registry, card, CardKeyword::Sly));
+        assert!(log.iter().any(|entry| {
+            matches!(
+                entry,
+                LogEntry::StateChanged(StateChange::CardKeywordChanged {
+                    card: changed,
+                    keyword: CardKeyword::Sly,
+                    added: true,
+                    duration: CardKeywordDuration::Persistent,
+                }) if *changed == card
+            )
+        }));
+
+        resolver.enqueue(Effect::RemoveCardKeyword {
+            card,
+            keyword: CardKeyword::Sly,
+            source: None,
+        });
+        let StepResult::Done(_) = resolver.drain(&mut state, &registry) else {
+            panic!("expected persistent keyword remove to finish");
+        };
+        assert!(!state.card_has_keyword(&registry, card, CardKeyword::Sly));
+
+        resolver.enqueue(Effect::AddCardKeyword {
+            card,
+            keyword: CardKeyword::Retain,
+            duration: CardKeywordDuration::ThisTurn,
+            source: None,
+        });
+        let StepResult::Done(_) = resolver.drain(&mut state, &registry) else {
+            panic!("expected turn keyword add to finish");
+        };
+        assert!(state.card_has_keyword(&registry, card, CardKeyword::Retain));
+
+        resolver.enqueue(Effect::RemoveCardKeyword {
+            card,
+            keyword: CardKeyword::Retain,
+            source: None,
+        });
+        let StepResult::Done(_) = resolver.drain(&mut state, &registry) else {
+            panic!("expected persistent keyword remove to finish");
+        };
+        assert!(
+            state.card_has_keyword(&registry, card, CardKeyword::Retain),
+            "persistent removal must not clear a keyword granted only for this turn"
+        );
+
+        resolver.enqueue(Effect::ClearCardTurnState { player });
+        let StepResult::Done(log) = resolver.drain(&mut state, &registry) else {
+            panic!("expected turn keyword cleanup to finish");
+        };
+        assert!(!state.card_has_keyword(&registry, card, CardKeyword::Retain));
+        assert!(log.iter().any(|entry| {
+            matches!(
+                entry,
+                LogEntry::StateChanged(StateChange::CardKeywordChanged {
+                    card: changed,
+                    keyword: CardKeyword::Retain,
+                    added: false,
+                    duration: CardKeywordDuration::ThisTurn,
+                }) if *changed == card
+            )
+        }));
+    }
+
+    #[test]
+    fn manual_discard_autoplays_runtime_sly_after_discard_and_then_draw() {
+        let mut registry = StaticRegistry::empty();
+        registry
+            .cards
+            .register(test_skill_def(TEST_SLY_SKILL, test_gain_energy_body));
+        registry
+            .cards
+            .register(test_skill_def(TEST_BLANK_SKILL, test_no_effect_body));
+        let mut state = GameState::single_player_test_combat(
+            302,
+            [CombatSetupCard {
+                def: TEST_SLY_SKILL,
+                upgraded: false,
+                costs: CardCosts::energy(3),
+            }],
+            [CombatSetupMonster {
+                model: None,
+                max_hp: 30,
+            }],
+            80,
+            0,
+            1,
+        );
+        let player = state.player_id().unwrap();
+        let sly_card = state.combat().unwrap().player.piles.hand[0];
+        let drawn_card = state
+            .add_generated_card(
+                player,
+                TEST_BLANK_SKILL,
+                PileId::player(player, PileKind::Draw),
+                false,
+                CardCosts::energy(3),
+                false,
+                false,
+            )
+            .unwrap();
+        let mut resolver = EffectResolver::default();
+
+        resolver.enqueue(Effect::AddCardKeyword {
+            card: sly_card,
+            keyword: CardKeyword::Sly,
+            duration: CardKeywordDuration::ThisTurn,
+            source: None,
+        });
+        let StepResult::Done(_) = resolver.drain(&mut state, &registry) else {
+            panic!("expected runtime sly add to finish");
+        };
+
+        resolver.enqueue(Effect::DiscardCards {
+            player,
+            cards: vec![sly_card],
+            kind: DiscardKind::Manual,
+            then_draw: 1,
+        });
+        let StepResult::Done(log) = resolver.drain(&mut state, &registry) else {
+            panic!("expected manual discard to finish");
+        };
+
+        assert_eq!(state.combat().unwrap().player.energy, 1);
+        assert!(state.card_is_in_pile(sly_card, PileKind::Discard));
+        assert!(state.card_is_in_pile(drawn_card, PileKind::Hand));
+
+        let discard_pos = log
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    LogEntry::EventTriggered(Event::CardDiscarded(event))
+                        if event.card == sly_card && event.kind == DiscardKind::Manual
+                )
+            })
+            .expect("manual discard event should be logged");
+        let draw_pos = log
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    LogEntry::EventTriggered(Event::CardDrawn(event))
+                        if event.card == drawn_card
+                )
+            })
+            .expect("then_draw should draw before Sly autoplay");
+        let play_pos = log
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    LogEntry::EventTriggered(Event::CardPlayed(event))
+                        if event.card == sly_card
+                )
+            })
+            .expect("Sly discard should autoplay the discarded card");
+
+        assert!(discard_pos < draw_pos);
+        assert!(draw_pos < play_pos);
     }
 
     fn strength_additive(

@@ -88,27 +88,7 @@ fn describe_keywords(ctx: &CardTextCtx<'_>, card: CardInstanceId) -> Vec<CardKey
     let Some(def) = ctx.registry.cards.get(card_state.def) else {
         return Vec::new();
     };
-    let mut keywords = Vec::new();
-    for keyword in def.keywords {
-        push_keyword(&mut keywords, *keyword);
-    }
-    if card_state.upgraded {
-        for keyword in def.upgraded_keywords {
-            push_keyword(&mut keywords, *keyword);
-        }
-    }
-    if card_state.flags.ethereal {
-        push_keyword(&mut keywords, CardKeyword::Ethereal);
-    }
-    if card_state.flags.temporary {
-        push_keyword(&mut keywords, CardKeyword::Temporary);
-    }
-    if card_state.flags.purge_on_use {
-        push_keyword(&mut keywords, CardKeyword::PurgeOnUse);
-    }
-    if card_state.flags.zero_cost_this_turn {
-        push_keyword(&mut keywords, CardKeyword::FreeThisTurn);
-    }
+    let mut keywords = ctx.state.card_effective_keywords(ctx.registry, card);
     if ctx.scope == CardTextScope::Hand
         && def.card_type == CardType::Skill
         && ctx

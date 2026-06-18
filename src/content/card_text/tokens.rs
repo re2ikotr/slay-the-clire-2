@@ -1,7 +1,7 @@
 use super::{CardTextCtx, CardTextLine};
 use crate::content::cards::GIANT_ROCK;
 use crate::content::generated_cards::{
-    DISINTEGRATION, FUEL, LUMINESCE, MINION_DIVE_BOMB, MINION_SACRIFICE, MINION_STRIKE, MIND_ROT,
+    DISINTEGRATION, FUEL, LUMINESCE, MIND_ROT, MINION_DIVE_BOMB, MINION_SACRIFICE, MINION_STRIKE,
     SHIV, SLOTH, SOUL, SOVEREIGN_BLADE, SWEEPING_GAZE, WASTE_AWAY,
 };
 use crate::core::ids::CardInstanceId;
@@ -16,7 +16,10 @@ pub(super) fn describe_lines(ctx: &CardTextCtx<'_>, card: CardInstanceId) -> Vec
         // Token pool, so it falls through here for text resolution too.
         GIANT_ROCK => {
             let amount = if upgraded { 20 } else { 16 };
-            vec![l(format!("Deal {amount} damage."), format!("造成{amount}点伤害。"))]
+            vec![l(
+                format!("Deal {amount} damage."),
+                format!("造成{amount}点伤害。"),
+            )]
         }
 
         // ---- Playable tokens ----
@@ -25,25 +28,40 @@ pub(super) fn describe_lines(ctx: &CardTextCtx<'_>, card: CardInstanceId) -> Vec
             let cards_zhs = if upgraded { "2张牌" } else { "1张牌" };
             vec![
                 l("Gain [energy:1].", "获得[energy:1]。"),
-                l(format!("Draw {cards} card{}.", if cards == 1 { "" } else { "s" }), format!("抽{cards_zhs}。")),
+                l(
+                    format!("Draw {cards} card{}.", if cards == 1 { "" } else { "s" }),
+                    format!("抽{cards_zhs}。"),
+                ),
             ]
         }
         LUMINESCE => {
             let amount = if upgraded { 3 } else { 2 };
-            vec![l(format!("Gain [energy:{amount}]."), format!("获得[energy:{amount}]。"))]
+            vec![l(
+                format!("Gain [energy:{amount}]."),
+                format!("获得[energy:{amount}]。"),
+            )]
         }
         MINION_DIVE_BOMB => {
             let amount = if upgraded { 16 } else { 13 };
-            vec![l(format!("Deal {amount} damage."), format!("造成{amount}点伤害。"))]
+            vec![l(
+                format!("Deal {amount} damage."),
+                format!("造成{amount}点伤害。"),
+            )]
         }
         MINION_SACRIFICE => {
             let amount = if upgraded { 12 } else { 9 };
-            vec![l(format!("Gain {amount} [gold]Block[/gold]."), format!("获得{amount}点[gold]格挡[/gold]。"))]
+            vec![l(
+                format!("Gain {amount} [gold]Block[/gold]."),
+                format!("获得{amount}点[gold]格挡[/gold]。"),
+            )]
         }
         MINION_STRIKE => {
             let amount = if upgraded { 9 } else { 6 };
             vec![
-                l(format!("Deal {amount} damage."), format!("造成{amount}点伤害。")),
+                l(
+                    format!("Deal {amount} damage."),
+                    format!("造成{amount}点伤害。"),
+                ),
                 l("Draw 1 card.", "抽1张牌。"),
             ]
         }
@@ -54,11 +72,17 @@ pub(super) fn describe_lines(ctx: &CardTextCtx<'_>, card: CardInstanceId) -> Vec
             // sync with the actual effect; the C# source uses single-target
             // unless the FanOfKnives power is active, which this engine does
             // not model yet.
-            vec![l(format!("Deal {amount} damage."), format!("造成{amount}点伤害。"))]
+            vec![l(
+                format!("Deal {amount} damage."),
+                format!("造成{amount}点伤害。"),
+            )]
         }
         SOUL => {
             let amount = if upgraded { 3 } else { 2 };
-            vec![l(format!("Draw {amount} cards."), format!("抽{amount}张牌。"))]
+            vec![l(
+                format!("Draw {amount} cards."),
+                format!("抽{amount}张牌。"),
+            )]
         }
         SOVEREIGN_BLADE => vec![l("Deal 10 damage.", "造成10点伤害。")],
         SWEEPING_GAZE => {

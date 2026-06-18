@@ -296,17 +296,17 @@ pub(crate) fn card_matches_filter(
             .and_then(|card| ctx.registry.cards.get(card.def))
             .map(|def| def.card_type != CardType::Attack)
             .unwrap_or(false),
-        CardFilter::NotRetainedThisTurn => {
+        CardFilter::SkillWithoutKeyword(keyword) => {
             ctx.state
                 .card(card)
-                .map(|card| !card.flags.retain_this_turn)
+                .and_then(|card| ctx.registry.cards.get(card.def))
+                .map(|def| def.card_type == CardType::Skill)
                 .unwrap_or(false)
-                && !ctx
-                    .state
-                    .card(card)
-                    .and_then(|card| ctx.registry.cards.get(card.def).map(|def| (card, def)))
-                    .map(|(card, def)| def.has_keyword(card.upgraded, CardKeyword::Retain))
-                    .unwrap_or(false)
+                && !ctx.state.card_has_keyword(ctx.registry, card, keyword)
+        }
+        CardFilter::NotRetainedThisTurn => {
+            !ctx.state
+                .card_has_keyword(ctx.registry, card, CardKeyword::Retain)
         }
     }
 }

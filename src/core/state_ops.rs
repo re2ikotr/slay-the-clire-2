@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 
+use crate::content::cards::CardKeyword;
 use crate::core::ids::{
     CardId, CardInstanceId, CreatureId, OrbId, OrbInstanceId, PlayerId, PowerId, PowerInstanceId,
 };
 use crate::core::state::{
-    decimal_to_i32_trunc, CardCosts, CardCounter, CardFlags, CardInstance, GameState, OrbInstance,
-    PileId, PileKind, PowerCounter, PowerInstance, ResourceKind, Side, StateError,
-    TemporaryCardCosts, MAX_CARDS_IN_HAND, MAX_ORB_SLOTS,
+    decimal_to_i32_trunc, CardCosts, CardCounter, CardFlags, CardInstance, CardKeywordDuration,
+    CardKeywordState, GameState, OrbInstance, PileId, PileKind, PowerCounter, PowerInstance,
+    ResourceKind, Side, StateError, TemporaryCardCosts, MAX_CARDS_IN_HAND, MAX_ORB_SLOTS,
 };
 
 impl GameState {
@@ -258,12 +259,91 @@ impl GameState {
 
         if let Some(card_state) = combat.cards.get_mut(&card) {
             card_state.pile = to;
-            if !matches!(to.kind, PileKind::Hand) {
-                card_state.clear_turn_limited_state();
-            }
         }
 
         Ok(from)
+    }
+
+    pub fn card_has_keyword(
+        &self,
+        registry: &crate::registry::StaticRegistry,
+        card: CardInstanceId,
+        keyword: CardKeyword,
+    ) -> bool {
+        self.card(card)
+            .and_then(|card_state| {
+                registry
+                    .cards
+                    .get(card_state.def)
+                    .map(|def| (card_state, def))
+            })
+            .map(|(card_state, def)| {
+                let static_keyword = def.has_keyword(card_state.upgraded, keyword);
+                let flag_keyword = match keyword {
+                    CardKeyword::Ethereal => card_state.flags.ethereal,
+                    CardKeyword::Temporary => card_state.flags.temporary,
+                    CardKeyword::PurgeOnUse => card_state.flags.purge_on_use,
+                    CardKeyword::FreeThisTurn => card_state.flags.zero_cost_this_turn,
+                    _ => false,
+                };
+                card_state
+                    .keyword_state
+                    .is_active(static_keyword || flag_keyword, keyword)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn card_effective_keywords(
+        &self,
+        registry: &crate::registry::StaticRegistry,
+        card: CardInstanceId,
+    ) -> Vec<CardKeyword> {
+        CardKeyword::ALL
+            .iter()
+            .copied()
+            .filter(|keyword| self.card_has_keyword(registry, card, *keyword))
+            .collect()
+    }
+
+    pub fn add_card_keyword(
+        &mut self,
+        card: CardInstanceId,
+        keyword: CardKeyword,
+        duration: CardKeywordDuration,
+    ) -> Result<bool, StateError> {
+        let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
+        Ok(card.keyword_state.add(keyword, duration))
+    }
+
+    pub fn remove_card_keyword(
+        &mut self,
+        card: CardInstanceId,
+        keyword: CardKeyword,
+    ) -> Result<bool, StateError> {
+        let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
+        Ok(card.keyword_state.remove(keyword))
+    }
+
+    pub fn clear_player_card_turn_state(
+        &mut self,
+        player: PlayerId,
+    ) -> Result<Vec<(CardInstanceId, Vec<CardKeyword>)>, StateError> {
+        let combat = self.combat.as_mut().ok_or(StateError::CombatNotActive)?;
+        if combat.player.id != player {
+            return Err(StateError::UnknownPlayer(player));
+        }
+        let mut cleared = Vec::new();
+        for card in combat
+            .cards
+            .values_mut()
+            .filter(|card| card.owner == player)
+        {
+            let keywords = card.clear_turn_limited_state();
+            if !keywords.is_empty() {
+                cleared.push((card.id, keywords));
+            }
+        }
+        Ok(cleared)
     }
 
     pub fn add_generated_card(
@@ -282,6 +362,14 @@ impl GameState {
         }
 
         let id = combat.alloc_card_instance_id();
+        let mut keyword_state = CardKeywordState::default();
+        if temporary {
+            keyword_state.add(CardKeyword::Temporary, CardKeywordDuration::Persistent);
+        }
+        if zero_cost_this_turn {
+            keyword_state.add(CardKeyword::FreeThisTurn, CardKeywordDuration::ThisTurn);
+        }
+
         combat.cards.insert(
             id,
             CardInstance {
@@ -304,6 +392,7 @@ impl GameState {
                     zero_cost_this_turn,
                     ..CardFlags::default()
                 },
+                keyword_state,
                 counters: BTreeMap::new(),
             },
         );
@@ -330,9 +419,12 @@ impl GameState {
         card: CardInstanceId,
         retained: bool,
     ) -> Result<bool, StateError> {
-        let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
-        card.flags.retain_this_turn = retained;
-        Ok(retained)
+        if retained {
+            self.add_card_keyword(card, CardKeyword::Retain, CardKeywordDuration::ThisTurn)
+        } else {
+            let card = self.card_mut(card).ok_or(StateError::UnknownCard(card))?;
+            Ok(card.keyword_state.remove_this_turn(CardKeyword::Retain))
+        }
     }
 
     pub fn add_card_counter(

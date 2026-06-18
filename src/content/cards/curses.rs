@@ -132,20 +132,27 @@ const CURSE_CARD_SPECS: &[CurseSpec] = &[
     curse!(INJURY, KW_UNPLAYABLE, no_play),
     curse!(POOR_SLEEP, KW_RETAIN_UNPLAYABLE, no_play),
     curse!(WRITHE, KW_INNATE_UNPLAYABLE, no_play),
-
     // Turn-end-in-hand curses. Bodies live in `card_rules_for`'s `on_event`.
     curse!(BAD_LUCK, KW_UNPLAYABLE_ETERNAL, no_play),
     curse!(DECAY, KW_UNPLAYABLE, no_play),
     curse!(DOUBT, KW_UNPLAYABLE, no_play),
     curse!(REGRET, KW_UNPLAYABLE, no_play),
     curse!(SHAME, KW_UNPLAYABLE, no_play),
-
     // Play-prevention curses (rules are in `card_rules_for`'s `decide`).
     curse!(NORMALITY, KW_UNPLAYABLE, no_play),
-
     // Curses with actual playable cost. Their bodies are real play functions.
-    curse!(ENTHRALLED, KW_ETERNAL, CardCosts::energy(2), enthralled_play),
-    curse!(SPORE_MIND, KW_EXHAUST, CardCosts::energy(1), spore_mind_play),
+    curse!(
+        ENTHRALLED,
+        KW_ETERNAL,
+        CardCosts::energy(2),
+        enthralled_play
+    ),
+    curse!(
+        SPORE_MIND,
+        KW_EXHAUST,
+        CardCosts::energy(1),
+        spore_mind_play
+    ),
 ];
 
 pub fn register_curse_cards(registry: &mut DefRegistry<CardId, CardDef>) {
@@ -217,11 +224,7 @@ fn card_rules_for(id: CardId) -> CardRules {
 
 /// Helper: only fire if the curse is in the player's hand and the event is the
 /// player's own end of turn.
-fn end_of_player_turn_in_hand(
-    ctx: &RuleCtx<'_>,
-    card: CardInstanceId,
-    event: &Event,
-) -> bool {
+fn end_of_player_turn_in_hand(ctx: &RuleCtx<'_>, card: CardInstanceId, event: &Event) -> bool {
     if !matches!(event, Event::TurnEnded { side: Side::Player }) {
         return false;
     }
